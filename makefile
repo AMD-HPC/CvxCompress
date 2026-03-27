@@ -16,7 +16,7 @@ ifeq ($(shell uname), Darwin)
 	rflags = -install_name @rpath/libcvxcompress.dylib
 else
     LIB_EXT = so
-	rflags = 
+	rflags =
 endif
 
 BUILDDIR ?= build
@@ -39,8 +39,8 @@ lib: $(OBJECTS)
 libcvxcompress.$(LIB_EXT) : $(OBJECTS)
 	$(CXX) -shared $(LDFLAGS) -o libcvxcompress.$(LIB_EXT) $(OBJECTS)
 
-Wavelet_Transform_Fast.o: Wavelet_Transform_Fast.cpp Ds79_Base.cpp Us79_Base.cpp 
-	$(CXX) -c $(CFLAGS) $< 
+Wavelet_Transform_Fast.o: Wavelet_Transform_Fast.cpp Ds79_Base.cpp Us79_Base.cpp
+	$(CXX) -c $(CFLAGS) $<
 
 CvxCompress_Test: CvxCompress_Test.o $(OBJECTS)
 	$(CXX) $(LDFLAGS) $(TFLAG) $(OBJECTS)  CvxCompress_Test.o -o CvxCompress_Test
@@ -57,10 +57,10 @@ Test_Compression: Test_Compression.o $(OBJECTS)
 Ds79_Base.cpp Us79_Base.cpp: CvxCompress.hxx CvxCompress_GenCode
 	./CvxCompress_GenCode
 
-Compress_SEAM_Basin: Compress_SEAM_Basin.o libcvxcompress.$(LIB_EXT) 
+Compress_SEAM_Basin: Compress_SEAM_Basin.o libcvxcompress.$(LIB_EXT)
 	$(CXX) $(LDFLAGS) $(TFLAG) $<  -L. -lcvxcompress  -o $@
 
-Test_With_Generated_Input: Test_With_Generated_Input.o libcvxcompress.$(LIB_EXT) 
+Test_With_Generated_Input: Test_With_Generated_Input.o libcvxcompress.$(LIB_EXT)
 	$(CXX) $(LDFLAGS) $(TFLAG) $<  -L. -lcvxcompress  -o $@
 
 %.o: %.c
@@ -83,7 +83,7 @@ test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length
 
 # Z-line vs full-block CR benchmark (CPU-only, links libcvxcompress)
 test_zline_cr_benchmark: tests/test_zline_cr_benchmark.cpp hip/quantize_rle_ref.h libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
-	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_zline_cr_benchmark.cpp -L. -lcvxcompress -o $(BUILDDIR)/test_zline_cr_benchmark
+	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_zline_cr_benchmark.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_zline_cr_benchmark
 
 # GPU quantize+RLE encode test (validates against CPU reference)
 test_quantize_rle_hip: tests/test_quantize_rle_hip.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx hip/hipQuantizeRLE.h | $(BUILDDIR)
@@ -111,7 +111,7 @@ test_wavelet_rle_fused_hip: tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletR
 
 # hipCompress public API test
 test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress -lm -o $(BUILDDIR)/test_compress_api_hip
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/test_compress_api_hip
 
 # Async pipeline example (for profiling)
 example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
