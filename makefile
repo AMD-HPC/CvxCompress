@@ -26,7 +26,12 @@ OBJECTS=CvxCompress.o Wavelet_Transform_Slow.o Wavelet_Transform_Fast.o Run_Leng
 HIPCC ?= hipcc
 HIP_ARCH ?= gfx90a
 HIPCFLAGS = -O2 -std=c++17 -fopenmp
-HIPLDFLAGS = -lm -lrocrand
+HIPLDFLAGS = -lm
+
+# Only `test_wavelet_buffer_hip` requires `rocrand` ie: `-lrocrand `
+
+# Could drop `hip/` directory and use `$(foreach OBJ,$(HIP_OBJECTS), hip/$(OBJ))`
+HIP_OBJECTS=hip/hipCompress.o hip/hipWaveletTransformBuffer.o
 
 all: CvxCompress_Test CvxCompress_Test_Dyn Test_Compression Compress_SEAM_Basin Test_With_Generated_Input
 
@@ -73,9 +78,15 @@ Test_With_Generated_Input: Test_With_Generated_Input.o libcvxcompress.$(LIB_EXT)
 # HIP GPU tests
 # ---------------------------------------------------------------------------
 
+libhipcvxcompress.$(LIB_EXT) : $(HIP_OBJECTS)
+	$(HIPCC) -shared $(HIPLDFLAGS) -o libhipcvxcompress.$(LIB_EXT) $(HIP_OBJECTS)
+
+hip/%.o: hip/%.cpp
+	$(HIPCC) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -fPIC -c $(HIPCFLAGS) hip/$*.cpp -o $@
+
 # Buffer-instruction wavelet kernel test
 test_wavelet_buffer_hip: tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -lrocrand -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
 
 # Quantize + RLE z-line unit test (CPU-only, no HIP)
 test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx | $(BUILDDIR)
@@ -121,4 +132,6 @@ clean:
 	rm -f *.o
 	rm -f libcvxcompress.$(LIB_EXT) CvxCompress_Test CvxCompress_Test_Dyn CvxCompress_GenCode Test_Compression Compress_SEAM_Basin Test_With_Generated_Input
 	rm -f Ds79_Base.cpp Us79_Base.cpp
+	rm -f hip/*.o
+	rm -f libhipcvxcompress.$(LIB_EXT)
 	rm -rf $(BUILDDIR)
