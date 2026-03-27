@@ -1,0 +1,137 @@
+// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Use of this source code is governed by an MIT-style license that can be
+// found in the LICENSE file or at https://opensource.org/licenses/MIT.
+
+__device__ __forceinline__
+void ds79_forward_reg32(float* data) {
+    float t0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31;
+    // Level n=32: nl=16, nh=16
+    t0 = data[0];
+    t1 = data[1];
+    t2 = data[2];
+    t3 = data[3];
+    t4 = data[4];
+    t5 = data[5];
+    t6 = data[6];
+    t7 = data[7];
+    t8 = data[8];
+    t9 = data[9];
+    t10 = data[10];
+    t11 = data[11];
+    t12 = data[12];
+    t13 = data[13];
+    t14 = data[14];
+    t15 = data[15];
+    t16 = data[16];
+    t17 = data[17];
+    t18 = data[18];
+    t19 = data[19];
+    t20 = data[20];
+    t21 = data[21];
+    t22 = data[22];
+    t23 = data[23];
+    t24 = data[24];
+    t25 = data[25];
+    t26 = data[26];
+    t27 = data[27];
+    t28 = data[28];
+    t29 = data[29];
+    t30 = data[30];
+    t31 = data[31];
+    data[0] = DS79_AL0*t0 + DS79_AL1*(t1+t1) + DS79_AL2*(t2+t2) + DS79_AL3*(t3+t3) + DS79_AL4*(t4+t4);
+    data[1] = DS79_AL0*t2 + DS79_AL1*(t1+t3) + DS79_AL2*(t0+t4) + DS79_AL3*(t1+t5) + DS79_AL4*(t2+t6);
+    data[2] = DS79_AL0*t4 + DS79_AL1*(t3+t5) + DS79_AL2*(t2+t6) + DS79_AL3*(t1+t7) + DS79_AL4*(t0+t8);
+    data[3] = DS79_AL0*t6 + DS79_AL1*(t5+t7) + DS79_AL2*(t4+t8) + DS79_AL3*(t3+t9) + DS79_AL4*(t2+t10);
+    data[4] = DS79_AL0*t8 + DS79_AL1*(t7+t9) + DS79_AL2*(t6+t10) + DS79_AL3*(t5+t11) + DS79_AL4*(t4+t12);
+    data[5] = DS79_AL0*t10 + DS79_AL1*(t9+t11) + DS79_AL2*(t8+t12) + DS79_AL3*(t7+t13) + DS79_AL4*(t6+t14);
+    data[6] = DS79_AL0*t12 + DS79_AL1*(t11+t13) + DS79_AL2*(t10+t14) + DS79_AL3*(t9+t15) + DS79_AL4*(t8+t16);
+    data[7] = DS79_AL0*t14 + DS79_AL1*(t13+t15) + DS79_AL2*(t12+t16) + DS79_AL3*(t11+t17) + DS79_AL4*(t10+t18);
+    data[8] = DS79_AL0*t16 + DS79_AL1*(t15+t17) + DS79_AL2*(t14+t18) + DS79_AL3*(t13+t19) + DS79_AL4*(t12+t20);
+    data[9] = DS79_AL0*t18 + DS79_AL1*(t17+t19) + DS79_AL2*(t16+t20) + DS79_AL3*(t15+t21) + DS79_AL4*(t14+t22);
+    data[10] = DS79_AL0*t20 + DS79_AL1*(t19+t21) + DS79_AL2*(t18+t22) + DS79_AL3*(t17+t23) + DS79_AL4*(t16+t24);
+    data[11] = DS79_AL0*t22 + DS79_AL1*(t21+t23) + DS79_AL2*(t20+t24) + DS79_AL3*(t19+t25) + DS79_AL4*(t18+t26);
+    data[12] = DS79_AL0*t24 + DS79_AL1*(t23+t25) + DS79_AL2*(t22+t26) + DS79_AL3*(t21+t27) + DS79_AL4*(t20+t28);
+    data[13] = DS79_AL0*t26 + DS79_AL1*(t25+t27) + DS79_AL2*(t24+t28) + DS79_AL3*(t23+t29) + DS79_AL4*(t22+t30);
+    data[14] = DS79_AL0*t28 + DS79_AL1*(t27+t29) + DS79_AL2*(t26+t30) + DS79_AL3*(t25+t31) + DS79_AL4*(t24+t30);
+    data[15] = DS79_AL0*t30 + DS79_AL1*(t29+t31) + DS79_AL2*(t28+t30) + DS79_AL3*(t27+t29) + DS79_AL4*(t26+t28);
+    data[16] = DS79_AH0*t1 + DS79_AH1*(t0+t2) + DS79_AH2*(t1+t3) + DS79_AH3*(t2+t4);
+    data[17] = DS79_AH0*t3 + DS79_AH1*(t2+t4) + DS79_AH2*(t1+t5) + DS79_AH3*(t0+t6);
+    data[18] = DS79_AH0*t5 + DS79_AH1*(t4+t6) + DS79_AH2*(t3+t7) + DS79_AH3*(t2+t8);
+    data[19] = DS79_AH0*t7 + DS79_AH1*(t6+t8) + DS79_AH2*(t5+t9) + DS79_AH3*(t4+t10);
+    data[20] = DS79_AH0*t9 + DS79_AH1*(t8+t10) + DS79_AH2*(t7+t11) + DS79_AH3*(t6+t12);
+    data[21] = DS79_AH0*t11 + DS79_AH1*(t10+t12) + DS79_AH2*(t9+t13) + DS79_AH3*(t8+t14);
+    data[22] = DS79_AH0*t13 + DS79_AH1*(t12+t14) + DS79_AH2*(t11+t15) + DS79_AH3*(t10+t16);
+    data[23] = DS79_AH0*t15 + DS79_AH1*(t14+t16) + DS79_AH2*(t13+t17) + DS79_AH3*(t12+t18);
+    data[24] = DS79_AH0*t17 + DS79_AH1*(t16+t18) + DS79_AH2*(t15+t19) + DS79_AH3*(t14+t20);
+    data[25] = DS79_AH0*t19 + DS79_AH1*(t18+t20) + DS79_AH2*(t17+t21) + DS79_AH3*(t16+t22);
+    data[26] = DS79_AH0*t21 + DS79_AH1*(t20+t22) + DS79_AH2*(t19+t23) + DS79_AH3*(t18+t24);
+    data[27] = DS79_AH0*t23 + DS79_AH1*(t22+t24) + DS79_AH2*(t21+t25) + DS79_AH3*(t20+t26);
+    data[28] = DS79_AH0*t25 + DS79_AH1*(t24+t26) + DS79_AH2*(t23+t27) + DS79_AH3*(t22+t28);
+    data[29] = DS79_AH0*t27 + DS79_AH1*(t26+t28) + DS79_AH2*(t25+t29) + DS79_AH3*(t24+t30);
+    data[30] = DS79_AH0*t29 + DS79_AH1*(t28+t30) + DS79_AH2*(t27+t31) + DS79_AH3*(t26+t30);
+    data[31] = DS79_AH0*t31 + DS79_AH1*(t30+t30) + DS79_AH2*(t29+t29) + DS79_AH3*(t28+t28);
+    // Level n=16: nl=8, nh=8
+    t0 = data[0];
+    t1 = data[1];
+    t2 = data[2];
+    t3 = data[3];
+    t4 = data[4];
+    t5 = data[5];
+    t6 = data[6];
+    t7 = data[7];
+    t8 = data[8];
+    t9 = data[9];
+    t10 = data[10];
+    t11 = data[11];
+    t12 = data[12];
+    t13 = data[13];
+    t14 = data[14];
+    t15 = data[15];
+    data[0] = DS79_AL0*t0 + DS79_AL1*(t1+t1) + DS79_AL2*(t2+t2) + DS79_AL3*(t3+t3) + DS79_AL4*(t4+t4);
+    data[1] = DS79_AL0*t2 + DS79_AL1*(t1+t3) + DS79_AL2*(t0+t4) + DS79_AL3*(t1+t5) + DS79_AL4*(t2+t6);
+    data[2] = DS79_AL0*t4 + DS79_AL1*(t3+t5) + DS79_AL2*(t2+t6) + DS79_AL3*(t1+t7) + DS79_AL4*(t0+t8);
+    data[3] = DS79_AL0*t6 + DS79_AL1*(t5+t7) + DS79_AL2*(t4+t8) + DS79_AL3*(t3+t9) + DS79_AL4*(t2+t10);
+    data[4] = DS79_AL0*t8 + DS79_AL1*(t7+t9) + DS79_AL2*(t6+t10) + DS79_AL3*(t5+t11) + DS79_AL4*(t4+t12);
+    data[5] = DS79_AL0*t10 + DS79_AL1*(t9+t11) + DS79_AL2*(t8+t12) + DS79_AL3*(t7+t13) + DS79_AL4*(t6+t14);
+    data[6] = DS79_AL0*t12 + DS79_AL1*(t11+t13) + DS79_AL2*(t10+t14) + DS79_AL3*(t9+t15) + DS79_AL4*(t8+t14);
+    data[7] = DS79_AL0*t14 + DS79_AL1*(t13+t15) + DS79_AL2*(t12+t14) + DS79_AL3*(t11+t13) + DS79_AL4*(t10+t12);
+    data[8] = DS79_AH0*t1 + DS79_AH1*(t0+t2) + DS79_AH2*(t1+t3) + DS79_AH3*(t2+t4);
+    data[9] = DS79_AH0*t3 + DS79_AH1*(t2+t4) + DS79_AH2*(t1+t5) + DS79_AH3*(t0+t6);
+    data[10] = DS79_AH0*t5 + DS79_AH1*(t4+t6) + DS79_AH2*(t3+t7) + DS79_AH3*(t2+t8);
+    data[11] = DS79_AH0*t7 + DS79_AH1*(t6+t8) + DS79_AH2*(t5+t9) + DS79_AH3*(t4+t10);
+    data[12] = DS79_AH0*t9 + DS79_AH1*(t8+t10) + DS79_AH2*(t7+t11) + DS79_AH3*(t6+t12);
+    data[13] = DS79_AH0*t11 + DS79_AH1*(t10+t12) + DS79_AH2*(t9+t13) + DS79_AH3*(t8+t14);
+    data[14] = DS79_AH0*t13 + DS79_AH1*(t12+t14) + DS79_AH2*(t11+t15) + DS79_AH3*(t10+t14);
+    data[15] = DS79_AH0*t15 + DS79_AH1*(t14+t14) + DS79_AH2*(t13+t13) + DS79_AH3*(t12+t12);
+    // Level n=8: nl=4, nh=4
+    t0 = data[0];
+    t1 = data[1];
+    t2 = data[2];
+    t3 = data[3];
+    t4 = data[4];
+    t5 = data[5];
+    t6 = data[6];
+    t7 = data[7];
+    data[0] = DS79_AL0*t0 + DS79_AL1*(t1+t1) + DS79_AL2*(t2+t2) + DS79_AL3*(t3+t3) + DS79_AL4*(t4+t4);
+    data[1] = DS79_AL0*t2 + DS79_AL1*(t1+t3) + DS79_AL2*(t0+t4) + DS79_AL3*(t1+t5) + DS79_AL4*(t2+t6);
+    data[2] = DS79_AL0*t4 + DS79_AL1*(t3+t5) + DS79_AL2*(t2+t6) + DS79_AL3*(t1+t7) + DS79_AL4*(t0+t6);
+    data[3] = DS79_AL0*t6 + DS79_AL1*(t5+t7) + DS79_AL2*(t4+t6) + DS79_AL3*(t3+t5) + DS79_AL4*(t2+t4);
+    data[4] = DS79_AH0*t1 + DS79_AH1*(t0+t2) + DS79_AH2*(t1+t3) + DS79_AH3*(t2+t4);
+    data[5] = DS79_AH0*t3 + DS79_AH1*(t2+t4) + DS79_AH2*(t1+t5) + DS79_AH3*(t0+t6);
+    data[6] = DS79_AH0*t5 + DS79_AH1*(t4+t6) + DS79_AH2*(t3+t7) + DS79_AH3*(t2+t6);
+    data[7] = DS79_AH0*t7 + DS79_AH1*(t6+t6) + DS79_AH2*(t5+t5) + DS79_AH3*(t4+t4);
+    // Level n=4: nl=2, nh=2
+    t0 = data[0];
+    t1 = data[1];
+    t2 = data[2];
+    t3 = data[3];
+    data[0] = DS79_AL0*t0 + DS79_AL1*(t1+t1) + DS79_AL2*(t2+t2) + DS79_AL3*(t3+t3) + DS79_AL4*(t2+t2);
+    data[1] = DS79_AL0*t2 + DS79_AL1*(t1+t3) + DS79_AL2*(t0+t2) + DS79_AL3*(t1+t1) + DS79_AL4*(t2+t0);
+    data[2] = DS79_AH0*t1 + DS79_AH1*(t0+t2) + DS79_AH2*(t1+t3) + DS79_AH3*(t2+t2);
+    data[3] = DS79_AH0*t3 + DS79_AH1*(t2+t2) + DS79_AH2*(t1+t1) + DS79_AH3*(t0+t0);
+    // Level n=2: nl=1, nh=1
+    t0 = data[0];
+    t1 = data[1];
+    data[0] = DS79_AL0*t0 + DS79_AL1*(t1+t1) + DS79_AL2*(t0+t0) + DS79_AL3*(t1+t1) + DS79_AL4*(t0+t0);
+    data[1] = DS79_AH0*t1 + DS79_AH1*(t0+t0) + DS79_AH2*(t1+t1) + DS79_AH3*(t0+t0);
+}

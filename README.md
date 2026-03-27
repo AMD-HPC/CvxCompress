@@ -11,6 +11,23 @@ Ergas, R.A., "Seismic data compression--A key technology for the future", Societ
 https://library.seg.org/doi/pdf/10.1190/1.1826518
 ```
 
+# HIP GPU Port
+
+> **Status: Experimental / Proof of Concept**
+> - APIs are unstable and may change without notice
+> - Optimizations are ongoing
+> - Not tested in an integrated production setting
+> - No backward compatibility guarantee for the compressed bitstream format
+> - AMD GPUs only (ROCm 7.x, gfx90a/gfx942)
+> - Compression ratios differ from the CPU reference due to different block tiling strategies
+
+See [HIP_API.md](HIP_API.md) for the AMD GPU port of this library targeting
+MI200/MI300X via HIP. It implements a fused wavelet + quantization + RLE pipeline
+in single GPU kernels, achieving 14–27x speedup over the fully-parallelized CPU
+reference (128-core EPYC 9554, AVX, best thread count) with matching error norms
+(to floating-point rounding). Includes API reference, usage examples, and async
+pipeline integration.
+
 # Building
 
 ## GCC
