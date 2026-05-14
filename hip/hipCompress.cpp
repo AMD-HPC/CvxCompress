@@ -7,6 +7,7 @@
 #define DS79_INCLUDE_REG32
 #include "hipWaveletRLE.h"
 #include "hipWaveletRLEInverse.h"
+#include "hipWaveletRLE2D.h"
 #include "hipBlockCopy.h"
 
 #include <cmath>
@@ -67,20 +68,37 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
 
     if (nx <= 0 || ny <= 0 || nz <= 0)
         PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_DIMENSIONS, hipErrorInvalidValue);
-    if (nx % 32 != 0 || ny % 32 != 0 || nz % 32 != 0)
-        PLAN_ERROR(p, HIP_COMPRESS_ERROR_NOT_MULTIPLE_OF_32, hipErrorInvalidValue);
+
+    bool is_2d = (nz == 1);
+
+    if (is_2d) {
+        if (nx % 32 != 0 || ny % 32 != 0)
+            PLAN_ERROR(p, HIP_COMPRESS_ERROR_NOT_MULTIPLE_OF_32, hipErrorInvalidValue);
+    } else {
+        if (nx % 32 != 0 || ny % 32 != 0 || nz % 32 != 0)
+            PLAN_ERROR(p, HIP_COMPRESS_ERROR_NOT_MULTIPLE_OF_32, hipErrorInvalidValue);
+    }
+
     if ((long)nx * (long)ny * (long)sizeof(float) > (1L << 32))
         PLAN_ERROR(p, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
 
     p->kernel = kernel;
     p->nx = nx; p->ny = ny; p->nz = nz;
-    p->num_blocks = (nx / 32) * (ny / 32) * (nz / 32);
+    p->is_2d = is_2d;
     p->aux_stream = aux_stream;
     p->compress_pending = false;
     p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
 
+    if (is_2d) {
+        p->num_blocks = (nx / 32) * (ny / 32);
+        p->scratch_slot_stride = WRLE2D_SLOT_BYTES;
+    } else {
+        p->num_blocks = (nx / 32) * (ny / 32) * (nz / 32);
+        p->scratch_slot_stride = 4L * WRLE_LDS_BYTES;
+    }
+
     int nb = p->num_blocks;
-    long scratch_size = (long)nb * 4L * WRLE_LDS_BYTES;
+    long scratch_size = (long)nb * (long)p->scratch_slot_stride;
 
     HIPCHECK_PLAN(p, hipMalloc(&p->d_scratch, scratch_size));
     HIPCHECK_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
@@ -95,13 +113,15 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
 
     HIPCHECK_PLAN(p, hipMalloc(&p->d_rms, sizeof(double)));
 
-    p->max_copy_blocks = (nx / 32) * (ny / 32) * (nz / BCOPY_ZPB);
+    int nz_for_copy = is_2d ? 1 : nz;
+    p->max_copy_blocks = (nx / 32) * (ny / 32)
+                       * ((nz_for_copy + BCOPY_ZPB - 1) / BCOPY_ZPB);
     HIPCHECK_PLAN(p, hipMalloc(&p->d_partial_sums, p->max_copy_blocks * sizeof(double)));
 
     HIPCHECK_PLAN(p, hipEventCreateWithFlags(&p->ready_event, hipEventDisableTiming));
     HIPCHECK_PLAN(p, hipHostMalloc(&p->h_staging, 2 * sizeof(size_t)));
 
-    // JIT warmup: exclusive_scan on aux_stream (no user stream available yet)
+    // JIT warmup: exclusive_scan on aux_stream
     err = rocprim::exclusive_scan(
         p->d_scan_temp, p->scan_temp_bytes,
         p->d_block_sizes, p->d_block_offsets, (size_t)0, (size_t)1,
@@ -149,7 +169,7 @@ hipError_t hipCompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_SCALE, hipErrorInvalidValue);
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
-    const int ldimx = nx, ldimxy = nx * ny;
+    const int ldimx = nx;
     const int nb = plan->num_blocks;
     const int num_mulfacs = 1;
     const int hdr_size = hipCompressHeaderSize(nb, num_mulfacs);
@@ -157,17 +177,27 @@ hipError_t hipCompress(
     hipStream_t aux = plan->aux_stream;
 
     // 1. Fused wavelet + quantize + RLE → scratch (user_stream)
-    dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
-        waveletSegRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
+    if (plan->is_2d) {
+        int nbx = nx / 32, nby = ny / 32;
+        dim3 grid((nbx + WRLE2D_TILES_PER_WG - 1) / WRLE2D_TILES_PER_WG, nby);
+        waveletRLE2DFusedKernel<<<grid, dim3(256), 0, s>>>(
             d_input, plan->d_scratch, plan->d_block_sizes,
-            scale, ldimx, ldimxy,
+            scale, ldimx, nbx,
             d_rms, plan->d_mulfac);
     } else {
-        waveletRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
-            d_input, plan->d_scratch, plan->d_block_sizes,
-            scale, ldimx, ldimxy,
-            d_rms, plan->d_mulfac);
+        const int ldimxy = nx * ny;
+        dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
+        if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
+            waveletSegRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
+                d_input, plan->d_scratch, plan->d_block_sizes,
+                scale, ldimx, ldimxy,
+                d_rms, plan->d_mulfac);
+        } else {
+            waveletRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
+                d_input, plan->d_scratch, plan->d_block_sizes,
+                scale, ldimx, ldimxy,
+                d_rms, plan->d_mulfac);
+        }
     }
 
     // 2. Exclusive scan for compaction offsets (user_stream)
@@ -181,10 +211,18 @@ hipError_t hipCompress(
     HIPCHECK_PLAN(plan, hipStreamWaitEvent(aux, plan->ready_event, 0));
 
     // 4. Compact + write header on aux_stream
-    wrleCompactKernel<<<nb, 256, 0, aux>>>(
-        plan->d_scratch, d_output + hdr_size,
-        plan->d_block_sizes, plan->d_block_offsets,
-        d_output, nb, num_mulfacs, plan->d_mulfac);
+    if (plan->is_2d) {
+        wrle2DCompactKernel<<<nb, 256, 0, aux>>>(
+            plan->d_scratch, d_output + hdr_size,
+            plan->d_block_sizes, plan->d_block_offsets,
+            d_output, nb, num_mulfacs, plan->d_mulfac,
+            plan->scratch_slot_stride);
+    } else {
+        wrleCompactKernel<<<nb, 256, 0, aux>>>(
+            plan->d_scratch, d_output + hdr_size,
+            plan->d_block_sizes, plan->d_block_offsets,
+            d_output, nb, num_mulfacs, plan->d_mulfac);
+    }
 
     // 5. Async readback on aux_stream
     HIPCHECK_PLAN(plan, hipMemcpyAsync(&plan->h_staging[0], plan->d_block_offsets + (nb - 1),
@@ -241,14 +279,19 @@ hipError_t hipCopyToWaveletLayout(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_INPUT, hipErrorInvalidValue);
     if (!d_dst && !d_rms_out)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_BOTH_OUTPUTS_NULL, hipErrorInvalidValue);
-    if (ex < 32 || ey < 32 || ez < 32)
-        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
+    if (plan->is_2d) {
+        if (ex < 32 || ey < 32 || ez != 1)
+            PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
+    } else {
+        if (ex < 32 || ey < 32 || ez < 32)
+            PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
+    }
     if ((long)ldimxy * (long)sizeof(float) > (1L << 32))
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
 
     int wnx = hipCompressWaveletDim(ex);
     int wny = hipCompressWaveletDim(ey);
-    int wnz = hipCompressWaveletDim(ez);
+    int wnz = plan->is_2d ? 1 : hipCompressWaveletDim(ez);
 
     if (wnx != plan->nx || wny != plan->ny || wnz != plan->nz)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH, hipErrorInvalidValue);
@@ -258,7 +301,7 @@ hipError_t hipCopyToWaveletLayout(
     bool do_rms  = (d_rms_out != nullptr);
     long total_samples = (long)ex * ey * ez;
 
-    dim3 grid(wnx / 32, wny / 32, wnz / BCOPY_ZPB);
+    dim3 grid(wnx / 32, wny / 32, (wnz + BCOPY_ZPB - 1) / BCOPY_ZPB);
     int total_blocks = grid.x * grid.y * grid.z;
 
     if (do_copy && do_rms) {
@@ -307,19 +350,24 @@ hipError_t hipCopyFromWaveletLayout(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_INPUT, hipErrorInvalidValue);
     if (!d_dst)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_OUTPUT, hipErrorInvalidValue);
-    if (ex < 32 || ey < 32 || ez < 32)
-        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
+    if (plan->is_2d) {
+        if (ex < 32 || ey < 32 || ez != 1)
+            PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
+    } else {
+        if (ex < 32 || ey < 32 || ez < 32)
+            PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
+    }
     if ((long)ldimxy * (long)sizeof(float) > (1L << 32))
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
 
     int wnx = hipCompressWaveletDim(ex);
     int wny = hipCompressWaveletDim(ey);
-    int wnz = hipCompressWaveletDim(ez);
+    int wnz = plan->is_2d ? 1 : hipCompressWaveletDim(ez);
 
     if (wnx != plan->nx || wny != plan->ny || wnz != plan->nz)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH, hipErrorInvalidValue);
 
-    dim3 grid(wnx / 32, wny / 32, wnz / BCOPY_ZPB);
+    dim3 grid(wnx / 32, wny / 32, (wnz + BCOPY_ZPB - 1) / BCOPY_ZPB);
     copyFromWaveletKernelOpt<<<grid, 256, 0, user_stream>>>(
         d_src, wnx, wny, wnz,
         d_dst, ldimx, ldimxy, x0, y0, z0, ex, ey, ez);
@@ -344,17 +392,26 @@ hipError_t hipDecompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_OUTPUT, hipErrorInvalidValue);
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
-    const int ldimx = nx, ldimxy = nx * ny;
+    const int ldimx = nx;
 
-    dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
-        waveletSegRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
+    if (plan->is_2d) {
+        int nbx = nx / 32, nby = ny / 32;
+        dim3 grid((nbx + WRLE2D_TILES_PER_WG - 1) / WRLE2D_TILES_PER_WG, nby);
+        waveletRLE2DInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
             d_input, nullptr, nullptr,
-            d_output, 0.0f, ldimx, ldimxy, 1);
+            d_output, 0.0f, ldimx, nbx, 1);
     } else {
-        waveletRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
-            d_input, nullptr, nullptr,
-            d_output, 0.0f, ldimx, ldimxy, 1);
+        const int ldimxy = nx * ny;
+        dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
+        if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
+            waveletSegRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
+                d_input, nullptr, nullptr,
+                d_output, 0.0f, ldimx, ldimxy, 1);
+        } else {
+            waveletRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
+                d_input, nullptr, nullptr,
+                d_output, 0.0f, ldimx, ldimxy, 1);
+        }
     }
 
     hipError_t launch_err = hipGetLastError();
@@ -372,6 +429,6 @@ hipError_t hipCompressMaxOutputSize(const hipCompressPlan* plan, size_t* size)
     }
     plan->last_error = HIP_COMPRESS_SUCCESS;
     int hdr_size = hipCompressHeaderSize(plan->num_blocks, 1);
-    *size = (size_t)hdr_size + (size_t)plan->num_blocks * 4 * WRLE_LDS_BYTES;
+    *size = (size_t)hdr_size + (size_t)plan->num_blocks * plan->scratch_slot_stride;
     return hipSuccess;
 }

@@ -113,6 +113,10 @@ test_wavelet_rle_fused_hip: tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletR
 test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress -lm -o $(BUILDDIR)/test_compress_api_hip
 
+# 2D compression test
+test_compress_2d_hip: tests/test_compress_2d_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipWaveletRLE2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_2d_hip.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/test_compress_2d_hip
+
 # Async pipeline example (for profiling)
 example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/example_async_pipeline.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/example_async_pipeline
