@@ -106,6 +106,23 @@ static bool test_plan_lifecycle()
     size_t expected = (size_t)(8 + 8 * nb + 4) + (size_t)nb * 4 * 32768;
     if (max_sz != expected) { printf("  FAIL: MaxOutputSize=%zu expected=%zu\n", max_sz, expected); hipCompressDestroyPlan(plan); return false; }
     printf("  MaxOutputSize=%zu: PASS\n", max_sz);
+
+    // BufferSize
+    size_t buf_sz = 0;
+    HIPCHECK(hipCompressBufferSize(plan, &buf_sz));
+    size_t expected_buf = (size_t)64 * 64 * 64 * sizeof(float);
+    if (buf_sz != expected_buf) { printf("  FAIL: BufferSize=%zu expected=%zu\n", buf_sz, expected_buf); hipCompressDestroyPlan(plan); return false; }
+    printf("  BufferSize=%zu: PASS\n", buf_sz);
+    hipCompressDestroyPlan(plan);
+
+    // BufferSize with non-cubic dimensions
+    err = hipCompressCreatePlan(&plan, 128, 64, 32, 0);
+    if (err != hipSuccess) { printf("  FAIL: create 128x64x32 plan\n"); return false; }
+    buf_sz = 0;
+    HIPCHECK(hipCompressBufferSize(plan, &buf_sz));
+    expected_buf = (size_t)128 * 64 * 32 * sizeof(float);
+    if (buf_sz != expected_buf) { printf("  FAIL: BufferSize 128x64x32=%zu expected=%zu\n", buf_sz, expected_buf); hipCompressDestroyPlan(plan); return false; }
+    printf("  BufferSize 128x64x32=%zu: PASS\n", buf_sz);
     hipCompressDestroyPlan(plan);
 
     return true;
@@ -2367,6 +2384,12 @@ static bool test_error_codes()
         if (err != hipErrorInvalidValue) { printf("  FAIL [MaxOutputSize null plan]\n"); pass = false; }
         else printf("  ok [MaxOutputSize null plan]\n");
     }
+    {
+        size_t sz = 0;
+        hipError_t err = hipCompressBufferSize(nullptr, &sz);
+        if (err != hipErrorInvalidValue) { printf("  FAIL [BufferSize null plan]\n"); pass = false; }
+        else printf("  ok [BufferSize null plan]\n");
+    }
 
     // Allocate a valid plan for the remaining tests
     hipCompressPlan* plan = nullptr;
@@ -2567,6 +2590,14 @@ static bool test_error_codes()
     {
         hipError_t err = hipCompressMaxOutputSize(plan, nullptr);
         if (!check_error("MaxOutputSize null size", plan, err,
+                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_NULL_OUTPUT))
+            pass = false;
+    }
+
+    // --- BufferSize errors ---
+    {
+        hipError_t err = hipCompressBufferSize(plan, nullptr);
+        if (!check_error("BufferSize null size", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_NULL_OUTPUT))
             pass = false;
     }
