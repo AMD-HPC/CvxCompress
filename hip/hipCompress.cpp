@@ -363,6 +363,18 @@ hipError_t hipDecompress(
     return launch_err;
 }
 
+hipError_t hipCompressBufferSize(const hipCompressPlan* plan, size_t* size)
+{
+    if (!plan) return hipErrorInvalidValue;
+    if (!size) {
+        plan->last_error = HIP_COMPRESS_ERROR_NULL_OUTPUT;
+        return hipErrorInvalidValue;
+    }
+    plan->last_error = HIP_COMPRESS_SUCCESS;
+    *size = (size_t)plan->nx * plan->ny * plan->nz * sizeof(float);
+    return hipSuccess;
+}
+
 hipError_t hipCompressMaxOutputSize(const hipCompressPlan* plan, size_t* size)
 {
     if (!plan) return hipErrorInvalidValue;

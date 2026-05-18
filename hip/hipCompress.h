@@ -158,6 +158,9 @@ hipError_t hipDecompress(
     hipCompressPlan* plan,
     hipStream_t user_stream);
 
+// Uncompressed wavelet-layout buffer size in bytes (for allocation).
+hipError_t hipCompressBufferSize(const hipCompressPlan* plan, size_t* size);
+
 // Upper bound on compressed output size in bytes (for allocation).
 hipError_t hipCompressMaxOutputSize(const hipCompressPlan* plan, size_t* size);
 

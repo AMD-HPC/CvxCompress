@@ -1834,7 +1834,7 @@ static void bench_radial_sinc_sweep()
         int best_fwd_threads = 1, best_inv_threads = 1;
 
         std::vector<int> thread_sweep;
-        for (int t = 1; t <= max_threads; t *= 2) thread_sweep.push_back(t);
+        for (int t = 8; t <= max_threads; t *= 2) thread_sweep.push_back(t);
         if (thread_sweep.back() != max_threads) thread_sweep.push_back(max_threads);
 
         for (int nt : thread_sweep) {
