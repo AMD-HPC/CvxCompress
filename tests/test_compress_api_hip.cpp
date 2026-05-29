@@ -1478,6 +1478,20 @@ static bool test_copy_modes()
            rms_match ? "ok" : "FAIL");
     if (!rms_match) pass = false;
 
+    // hipComputeRMS wrapper: should match RMS-only path.
+    double h_rms3 = 0;
+    HIPCHECK(hipComputeRMS(
+        d_src, N, N * N,
+        0, 0, 0, N, N, N,
+        plan->d_rms, plan, 0));
+    HIPCHECK(hipDeviceSynchronize());
+    HIPCHECK(hipMemcpy(&h_rms3, plan->d_rms, sizeof(double), hipMemcpyDeviceToHost));
+    bool wrapper_match = (fabsf((float)h_rms3 - (float)h_rms1) < 1e-10f);
+    printf("  hipComputeRMS wrapper: rms=%.4e (match=%s): %s\n",
+           h_rms3, wrapper_match ? "yes" : "no",
+           wrapper_match ? "ok" : "FAIL");
+    if (!wrapper_match) pass = false;
+
     // Both NULL should error
     hipError_t err = hipCopyToWaveletLayout(
         d_src, N, N * N,
@@ -1486,6 +1500,20 @@ static bool test_copy_modes()
     bool err_ok = (err != hipSuccess);
     printf("  both-null: error=%s: %s\n", err_ok ? "yes" : "no", err_ok ? "ok" : "FAIL");
     if (!err_ok) pass = false;
+
+    // hipComputeRMS with null d_rms_out -> NULL_OUTPUT
+    hipError_t err_rms = hipComputeRMS(
+        d_src, N, N * N,
+        0, 0, 0, N, N, N,
+        nullptr, plan, 0);
+    hipCompressError_t lib_err = hipCompressGetLastError(plan);
+    bool err_rms_ok = (err_rms != hipSuccess) &&
+                      (lib_err == HIP_COMPRESS_ERROR_NULL_OUTPUT);
+    printf("  hipComputeRMS null-output: error=%s code=%s: %s\n",
+           err_rms != hipSuccess ? "yes" : "no",
+           hipCompressErrorString(lib_err),
+           err_rms_ok ? "ok" : "FAIL");
+    if (!err_rms_ok) pass = false;
 
     printf("  mode dispatch: %s\n", pass ? "PASS" : "FAIL");
     hipFree(d_src); hipFree(d_dst);

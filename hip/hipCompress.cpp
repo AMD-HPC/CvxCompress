@@ -292,6 +292,26 @@ hipError_t hipCopyToWaveletLayout(
     return launch_err;
 }
 
+hipError_t hipComputeRMS(
+    const float* d_src,
+    int ldimx, int ldimxy,
+    int x0, int y0, int z0,
+    int ex, int ey, int ez,
+    double* d_rms_out,
+    hipCompressPlan* plan,
+    hipStream_t user_stream)
+{
+    if (!plan) return hipErrorInvalidValue;
+    plan->last_error = HIP_COMPRESS_SUCCESS;
+    if (!d_rms_out)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_OUTPUT, hipErrorInvalidValue);
+    return hipCopyToWaveletLayout(
+        d_src, ldimx, ldimxy,
+        x0, y0, z0, ex, ey, ez,
+        /*d_dst=*/nullptr, d_rms_out,
+        plan, user_stream);
+}
+
 hipError_t hipCopyFromWaveletLayout(
     const float* d_src,
     float* d_dst,

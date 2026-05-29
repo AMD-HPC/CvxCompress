@@ -105,6 +105,19 @@ hipError_t hipCopyToWaveletLayout(
     hipCompressPlan* plan,
     hipStream_t user_stream);
 
+// Convenience wrapper: RMS-only mode of hipCopyToWaveletLayout.
+// Computes RMS over the ex*ey*ez extraction window; writes no wavelet buffer.
+// Equivalent to hipCopyToWaveletLayout(..., d_dst=NULL, d_rms_out, ...).
+// Returns HIP_COMPRESS_ERROR_NULL_OUTPUT if d_rms_out is NULL.
+hipError_t hipComputeRMS(
+    const float* d_src,
+    int ldimx, int ldimxy,
+    int x0, int y0, int z0,
+    int ex, int ey, int ez,
+    double* d_rms_out,
+    hipCompressPlan* plan,
+    hipStream_t user_stream);
+
 // Copy from a wavelet-layout buffer back to a strided destination volume.
 // Only the ex*ey*ez extraction samples are written; padding is skipped.
 // Wavelet dims are derived from the extraction window.
