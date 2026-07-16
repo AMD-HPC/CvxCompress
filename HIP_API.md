@@ -64,6 +64,7 @@ All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
 | Function | Description |
 |----------|-------------|
 | `hipCopyToWaveletLayout` | Copy from strided grid → contiguous wavelet buffer (zero-pad + optional RMS) |
+| `hipComputeRMS` | Convenience wrapper: RMS over extraction window only (no copy) |
 | `hipCopyFromWaveletLayout` | Copy from wavelet buffer → strided grid (extraction window only) |
 
 ### Compression / Decompression
