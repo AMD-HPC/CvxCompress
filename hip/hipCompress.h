@@ -38,6 +38,8 @@ struct hipCompressPlan {
     hipCompressKernel kernel;
     int nx, ny, nz;
     int num_blocks;
+    bool is_2d;             // true when nz == 1
+    size_t scratch_slot_stride;  // per-block scratch slot size
 
     unsigned char* d_scratch;
     float* d_mulfac;
@@ -89,7 +91,8 @@ hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 // Zero-fills the padding band (ex..wnx-1, etc.).
 // RMS is computed over the ex*ey*ez extraction window only.
 //
-// ex,ey,ez >= 32. Wavelet dims are derived internally: wnx = round32(ex), etc.
+// 3D: ex,ey,ez >= 32. Wavelet dims: wnx = round32(ex), etc.
+// 2D (nz=1): ex,ey >= 32, ez must be 1, wnz = 1.
 // Must equal plan dimensions exactly.
 //
 // d_dst may be NULL (RMS-only mode). d_rms_out may be NULL (copy-only mode).

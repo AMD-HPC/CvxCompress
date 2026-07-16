@@ -82,18 +82,20 @@ __global__ void copyToWaveletKernelOpt(
         }
     }
 
-    // ---- Phase 3: Store ZPB planes ----
+    // ---- Phase 3: Store ZPB planes (skip planes beyond wnz) ----
     if constexpr (DO_COPY) {
         uint32_t dst_byte = (gx + gy * wnx) * (uint32_t)sizeof(float);
 
         #pragma unroll
         for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
-            auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                d_dst + (long)(z_start + dz) * wnx * wny,
-                0, -1, 0x00027000);
-            auto vi = __builtin_bit_cast(bcopy_int4_vec, regs[dz]);
-            __builtin_amdgcn_raw_buffer_store_b128(
-                vi, plane_rsrc, dst_byte, 0, SLC);
+            if (z_start + dz < wnz) {
+                auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
+                    d_dst + (long)(z_start + dz) * wnx * wny,
+                    0, -1, 0x00027000);
+                auto vi = __builtin_bit_cast(bcopy_int4_vec, regs[dz]);
+                __builtin_amdgcn_raw_buffer_store_b128(
+                    vi, plane_rsrc, dst_byte, 0, SLC);
+            }
         }
     }
 
@@ -174,15 +176,20 @@ __global__ void copyFromWaveletKernelOpt(
     uint32_t src_byte = (gx + gy * wnx) * (uint32_t)sizeof(float);
     long wav_plane = (long)wnx * wny;
 
+    constexpr bcopy_float4_vec zero_vec_from = {0.0f, 0.0f, 0.0f, 0.0f};
     bcopy_float4_vec regs[BCOPY_ZPB];
     #pragma unroll
     for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
-        auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-            const_cast<float*>(d_src + (long)(z_start + dz) * wav_plane),
-            0, -1, 0x00027000);
-        regs[dz] = __builtin_bit_cast(bcopy_float4_vec,
-            __builtin_amdgcn_raw_buffer_load_b128(
-                plane_rsrc, src_byte, 0, SLC));
+        if (z_start + dz < wnz) {
+            auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
+                const_cast<float*>(d_src + (long)(z_start + dz) * wav_plane),
+                0, -1, 0x00027000);
+            regs[dz] = __builtin_bit_cast(bcopy_float4_vec,
+                __builtin_amdgcn_raw_buffer_load_b128(
+                    plane_rsrc, src_byte, 0, SLC));
+        } else {
+            regs[dz] = zero_vec_from;
+        }
     }
 
     uint32_t dst_byte = ((y0 + gy) * ldimx + x0 + gx) * (uint32_t)sizeof(float);
