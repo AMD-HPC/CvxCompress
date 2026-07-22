@@ -252,6 +252,13 @@ hipError_t hipCompressSynchronize(
     size_t total_payload = plan->h_staging[0] + plan->h_staging[1];
     long total_bytes = (long)hdr_size + (long)total_payload;
 
+    // Round the reported length up to 8 bytes. A caller packing streams
+    // back-to-back (base += compressed_length) then keeps each stream base
+    // >=8B aligned, which the in-stream size_t block-offset table requires.
+    // Decode is header/offset-driven and never reads the trailing pad bytes.
+    // CR carries this overhead since compressed_length is the reported size.
+    total_bytes = (total_bytes + 7) & ~7L;
+
     if (compressed_length)
         *compressed_length = total_bytes;
     if (compression_ratio) {
@@ -461,6 +468,9 @@ hipError_t hipCompressMaxOutputSize(const hipCompressPlan* plan, size_t* size)
     }
     plan->last_error = HIP_COMPRESS_SUCCESS;
     int hdr_size = hipCompressHeaderSize(plan->num_blocks, 1);
-    *size = (size_t)hdr_size + (size_t)plan->num_blocks * plan->scratch_slot_stride;
+    size_t raw = (size_t)hdr_size + (size_t)plan->num_blocks * plan->scratch_slot_stride;
+    // Include the 8B round-up slack applied to compressed_length so a buffer
+    // sized from this value can always hold the padded stream.
+    *size = (raw + 7) & ~(size_t)7;
     return hipSuccess;
 }

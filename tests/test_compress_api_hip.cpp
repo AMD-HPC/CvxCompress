@@ -104,6 +104,7 @@ static bool test_plan_lifecycle()
     HIPCHECK(hipCompressMaxOutputSize(plan, &max_sz));
     int nb = (64/32) * (64/32) * (64/32);
     size_t expected = (size_t)(8 + 8 * nb + 4) + (size_t)nb * 4 * 32768;
+    expected = (expected + 7) & ~(size_t)7;  // 8B round-up slack (see hipCompressMaxOutputSize)
     if (max_sz != expected) { printf("  FAIL: MaxOutputSize=%zu expected=%zu\n", max_sz, expected); hipCompressDestroyPlan(plan); return false; }
     printf("  MaxOutputSize=%zu: PASS\n", max_sz);
 
@@ -2783,11 +2784,178 @@ bool test_soffset_overflow()
     return pass;
 }
 
-int main(int argc, char**)
+// ---------------------------------------------------------------------------
+// Test 38: Pointer-shifted compressed buffer alignment.
+//
+// Mimics a user packing multiple compressed streams into one device buffer by
+// advancing the output pointer. If the shift is not sufficiently aligned, the
+// in-stream size_t block-offset table ((size_t*)(input+8))[bid] (8-byte access)
+// and/or wider accesses become misaligned on compress and decompress.
+//
+// forced_shift < 0 : suite mode, sweeps only the trusted (expected-aligned)
+//                    offsets {0,16,8} so a fault can't poison the rest of the
+//                    suite. Pass a numeric arg to the binary to test a single
+//                    offset in isolation (e.g. 4 or 12), which is the rigorous
+//                    way to pin the real requirement (8B vs 16B).
+// ---------------------------------------------------------------------------
+static bool test_pointer_shift_alignment(int forced_shift)
 {
+    printf("Test 38: pointer-shifted compressed buffer alignment\n");
+    const int N = 64, total = N * N * N;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+
+    float *d_input = nullptr, *d_output = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+
+    size_t comp_size = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &comp_size));
+    unsigned char* d_base = nullptr;              // hipMalloc => >=256B aligned
+    HIPCHECK(hipMalloc(&d_base, comp_size + 64));  // slack for the shift
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.f, 20.f, 20.f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    std::vector<float> h_in(total), h_out(total);
+    HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    float rms = hostRMS(h_in.data(), total);
+
+    std::vector<int> shifts;
+    if (forced_shift >= 0) shifts.push_back(forced_shift);
+    else { shifts.push_back(0); shifts.push_back(16); shifts.push_back(8); }
+
+    bool all_pass = true;
+    for (int off : shifts) {
+        unsigned char* d_shifted = d_base + off;
+
+        long len = 0; float cr = 0;
+        hipError_t cerr  = compressWithAutoRMS(scale, d_input, d_shifted, &len, &cr, plan);
+        hipError_t csync = hipDeviceSynchronize();
+
+        // Guard: do not issue HIPCHECK calls after a possible device fault.
+        hipError_t merr = hipErrorUnknown, derr = hipErrorUnknown, dsync = hipErrorUnknown;
+        if (cerr == hipSuccess && csync == hipSuccess) {
+            merr  = hipMemset(d_output, 0, total * sizeof(float));
+            derr  = hipDecompress(d_shifted, d_output, plan, 0);
+            dsync = hipDeviceSynchronize();
+        }
+
+        bool ok = (cerr == hipSuccess && csync == hipSuccess && merr == hipSuccess &&
+                   derr == hipSuccess && dsync == hipSuccess);
+        float rel = -1.f;
+        if (ok) {
+            hipError_t cp = hipMemcpy(h_out.data(), d_output, total * sizeof(float),
+                                      hipMemcpyDeviceToHost);
+            if (cp == hipSuccess) { rel = maxAbsError(h_in.data(), h_out.data(), total) / rms; ok = (rel < 1.0f); }
+            else ok = false;
+        }
+
+        printf("  shift=%2d B (mod16=%2d mod8=%d): c=%s csync=%s d=%s dsync=%s rel=%.3e -> %s\n",
+               off, off % 16, off % 8,
+               hipGetErrorString(cerr), hipGetErrorString(csync),
+               hipGetErrorString(derr), hipGetErrorString(dsync), rel, ok ? "OK" : "BAD");
+
+        all_pass = all_pass && ok;
+        if (!ok) { printf("  (context may be poisoned; stopping sweep)\n"); break; }
+    }
+
+    hipFree(d_input); hipFree(d_output); hipFree(d_base);
+    hipCompressDestroyPlan(plan);
+    printf("  pointer-shift alignment: %s\n", all_pass ? "PASS" : "FAIL (bug exposed)");
+    return all_pass;
+}
+
+// ---------------------------------------------------------------------------
+// Test 39: Two-stream packing with 8B-aligned compressed_length.
+//
+// Compresses two distinct volumes back-to-back into one buffer, advancing the
+// output pointer by the returned (8B-rounded) compressed_length, exactly as a
+// user packing many streams would. Then decodes each from its packed offset and
+// verifies: (a) both lengths are 8B multiples, (b) the second stream's base is
+// 8B aligned, (c) each decodes to its own content (B must not alias A).
+// ---------------------------------------------------------------------------
+static bool test_two_stream_packing()
+{
+    printf("Test 39: two-stream packing (8B-aligned length)\n");
+    const int N = 64, total = N * N * N;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+
+    float *d_inA = nullptr, *d_inB = nullptr, *d_out = nullptr;
+    HIPCHECK(hipMalloc(&d_inA, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_inB, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out, total * sizeof(float)));
+
+    size_t max_sz = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &max_sz));
+    unsigned char* d_pack = nullptr;
+    HIPCHECK(hipMalloc(&d_pack, 2 * max_sz + 64));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSinKernel<<<blocks, threads>>>(d_inA, N, N, N, 20.f, 20.f, 20.f);
+    initSinKernel<<<blocks, threads>>>(d_inB, N, N, N, 8.f, 13.f, 31.f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long lenA = 0, lenB = 0; float crA = 0, crB = 0;
+    HIPCHECK(compressWithAutoRMS(scale, d_inA, d_pack, &lenA, &crA, plan));
+    HIPCHECK(compressWithAutoRMS(scale, d_inB, d_pack + lenA, &lenB, &crB, plan));
+
+    bool lenA_8 = (lenA % 8 == 0);
+    bool lenB_8 = (lenB % 8 == 0);
+    bool baseB_8 = (((size_t)(d_pack + lenA)) % 8 == 0);
+
+    std::vector<float> hInA(total), hInB(total), hOut(total);
+    HIPCHECK(hipMemcpy(hInA.data(), d_inA, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(hInB.data(), d_inB, total * sizeof(float), hipMemcpyDeviceToHost));
+    float rmsA = hostRMS(hInA.data(), total), rmsB = hostRMS(hInB.data(), total);
+
+    HIPCHECK(hipMemset(d_out, 0, total * sizeof(float)));
+    HIPCHECK(hipDecompress(d_pack, d_out, plan, 0));
+    HIPCHECK(hipDeviceSynchronize());
+    HIPCHECK(hipMemcpy(hOut.data(), d_out, total * sizeof(float), hipMemcpyDeviceToHost));
+    float relA = maxAbsError(hInA.data(), hOut.data(), total) / rmsA;
+
+    HIPCHECK(hipMemset(d_out, 0, total * sizeof(float)));
+    HIPCHECK(hipDecompress(d_pack + lenA, d_out, plan, 0));
+    HIPCHECK(hipDeviceSynchronize());
+    HIPCHECK(hipMemcpy(hOut.data(), d_out, total * sizeof(float), hipMemcpyDeviceToHost));
+    float relB      = maxAbsError(hInB.data(), hOut.data(), total) / rmsB;
+    float relB_vsA  = maxAbsError(hInA.data(), hOut.data(), total) / rmsA;
+
+    bool pass = lenA_8 && lenB_8 && baseB_8 &&
+                (relA < 1.0f) && (relB < 1.0f) && (relB_vsA > 0.1f);
+
+    printf("  lenA=%ld (mod8=%ld) lenB=%ld (mod8=%ld) baseB_aligned=%d\n",
+           lenA, lenA % 8, lenB, lenB % 8, baseB_8);
+    printf("  relA=%.3e relB=%.3e (B-decoded vs A=%.3e, expect large)\n",
+           relA, relB, relB_vsA);
+    printf("  two-stream packing: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_inA); hipFree(d_inB); hipFree(d_out); hipFree(d_pack);
+    hipCompressDestroyPlan(plan);
+    return pass;
+}
+
+int main(int argc, char** argv)
+{
+    // Isolated diagnostic mode: a single numeric arg = forced byte shift for the
+    // pointer-shift alignment test only. Keeps a GPU memory fault from poisoning
+    // the rest of the suite (see Test 38).
+    if (argc >= 2) {
+        int forced = atoi(argv[1]);
+        bool ok = test_pointer_shift_alignment(forced);
+        return ok ? 0 : 1;
+    }
+
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 35;
+    int passed = 0, total = 37;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
     if (test_cr_vs_cpu())                   ++passed;
@@ -2823,6 +2991,8 @@ int main(int argc, char**)
     if (test_full_pipeline_nondefault_stream())   ++passed;
     if (test_error_codes())                       ++passed;
     if (test_soffset_overflow())                  ++passed;
+    if (test_pointer_shift_alignment(-1))         ++passed;
+    if (test_two_stream_packing())                ++passed;
 
     printf("\n%d/%d TESTS PASSED\n\n", passed, total);
 
