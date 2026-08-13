@@ -96,6 +96,10 @@ test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length
 test_zline_cr_benchmark: tests/test_zline_cr_benchmark.cpp hip/quantize_rle_ref.h libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_zline_cr_benchmark.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_zline_cr_benchmark
 
+# Bitmap vs production full-block RLE, four-bucket byte breakdown (CPU-only)
+test_bitmap_vs_cpu_rle: tests/test_bitmap_vs_cpu_rle.cpp Run_Length_Encode_Slow.hxx Run_Length_Escape_Codes.hxx Wavelet_Transform_Fast.hxx Block_Copy.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_bitmap_vs_cpu_rle.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_bitmap_vs_cpu_rle
+
 # GPU quantize+RLE encode test (validates against CPU reference)
 test_quantize_rle_hip: tests/test_quantize_rle_hip.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx hip/hipQuantizeRLE.h | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -I. -Ihip -Itests tests/test_quantize_rle_hip.cpp -lm -o $(BUILDDIR)/test_quantize_rle_hip
@@ -127,6 +131,14 @@ test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/h
 # 2D compression test
 test_compress_2d_hip: tests/test_compress_2d_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipWaveletRLE2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_2d_hip.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/test_compress_2d_hip
+
+# Bitmap-significance-split encode (kernel 1) validation vs RLE ground truth
+test_bitmap_encode_hip: tests/test_bitmap_encode_hip.cpp hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_encode_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_encode_hip
+
+# Bitmap-significance-split coding (kernel 2): correctness + CR + throughput
+test_bitmap_code_hip: tests/test_bitmap_code_hip.cpp hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_code_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_code_hip
 
 # Async pipeline example (for profiling)
 example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
