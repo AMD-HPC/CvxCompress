@@ -86,7 +86,7 @@ hip/%.o: hip/%.cpp
 
 # Buffer-instruction wavelet kernel test
 test_wavelet_buffer_hip: tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -lrocrand -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -lrocrand -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
 
 # Quantize + RLE z-line unit test (CPU-only, no HIP)
 test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx | $(BUILDDIR)
@@ -99,6 +99,10 @@ test_zline_cr_benchmark: tests/test_zline_cr_benchmark.cpp hip/quantize_rle_ref.
 # Bitmap vs production full-block RLE, four-bucket byte breakdown (CPU-only)
 test_bitmap_vs_cpu_rle: tests/test_bitmap_vs_cpu_rle.cpp Run_Length_Encode_Slow.hxx Run_Length_Escape_Codes.hxx Wavelet_Transform_Fast.hxx Block_Copy.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_bitmap_vs_cpu_rle.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_bitmap_vs_cpu_rle
+
+# Rate-distortion scale sweep on a real seismic panel (CPU-only)
+test_bitmap_rd_panel: tests/test_bitmap_rd_panel.cpp Run_Length_Encode_Slow.hxx Wavelet_Transform_Fast.hxx Block_Copy.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_bitmap_rd_panel.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_bitmap_rd_panel
 
 # GPU quantize+RLE encode test (validates against CPU reference)
 test_quantize_rle_hip: tests/test_quantize_rle_hip.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx hip/hipQuantizeRLE.h | $(BUILDDIR)
@@ -139,6 +143,10 @@ test_bitmap_encode_hip: tests/test_bitmap_encode_hip.cpp hip/hipWaveletBitmap.h 
 # Bitmap-significance-split coding (kernel 2): correctness + CR + throughput
 test_bitmap_code_hip: tests/test_bitmap_code_hip.cpp hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_code_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_code_hip
+
+# Octree significance coder (kernel 2 variant): round-trip + CR + throughput
+test_bitmap_octree_hip: tests/test_bitmap_octree_hip.cpp hip/hipWaveletOctree.h hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_octree_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_octree_hip
 
 # Async pipeline example (for profiling)
 example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
