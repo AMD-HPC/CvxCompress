@@ -756,24 +756,92 @@ inline hipError_t hipWaveletOctreeCode(
     return hipGetLastError();
 }
 
+// Round each per-block coded length up to `align` bytes.  In the compacted
+// stream the blocks are packed back-to-back, so this keeps every block start
+// (and thus its uint32 width-table / flat-mask reads) aligned.  Overhead is
+// <align bytes/block; the padding bytes are never read by the decoder.
+__global__ void woctAlignSizesKernel(size_t* __restrict__ sizes, int nb, int align)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < nb) sizes[i] = (sizes[i] + (align - 1)) & ~(size_t)(align - 1);
+}
+
+inline hipError_t waveletOctreeCodeParAlignSizes(size_t* sizes, int nb, hipStream_t stream = 0)
+{
+    int threads = 256, blocks = (nb + threads - 1) / threads;
+    woctAlignSizesKernel<<<blocks, threads, 0, stream>>>(sizes, nb, 4);
+    return hipGetLastError();
+}
+
+// Compaction: copies the variable-length coded blocks from the fixed-stride
+// (WOCT_CODE_SLOT_BYTES) intermediate into a tightly packed payload using the
+// exclusive-scan offsets, and writes the self-contained octree header (block
+// offsets + per-block significance sizes + mulfac).  dst points to the payload
+// region (after the header).  Mirrors wrleCompactKernel; the extra sig-size
+// table is what lets the decoder recover each block's significance length.
+__global__ void woctCompactKernel(
+    const unsigned char* __restrict__ src,
+    unsigned char* __restrict__ dst,
+    const size_t* __restrict__ block_sizes,
+    const size_t* __restrict__ offsets,
+    const size_t* __restrict__ sig_sizes,
+    unsigned char* __restrict__ hdr,
+    int num_blocks,
+    int num_mulfacs,
+    const float* __restrict__ d_mulfac)
+{
+    int bid = blockIdx.x;
+    int tid = threadIdx.x;
+    size_t size = block_sizes[bid];
+    size_t dst_off = offsets[bid];
+    size_t src_off = (size_t)bid * WOCT_CODE_SLOT_BYTES;
+
+    if (hdr != nullptr && tid == 0) {
+        ((size_t*)(hdr + 8))[bid] = offsets[bid];
+        ((uint32_t*)(hdr + 8 + 8L * num_blocks))[bid] = (uint32_t)sig_sizes[bid];
+        if (bid == 0) {
+            ((int*)hdr)[0] = num_blocks;
+            ((int*)hdr)[1] = num_mulfacs;
+            float* mf_dst = (float*)(hdr + 8 + 12L * num_blocks);
+            for (int i = 0; i < num_mulfacs; ++i)
+                mf_dst[i] = d_mulfac[i];
+        }
+    }
+
+    for (size_t i = tid * 4; i < size; i += blockDim.x * 4) {
+        unsigned val;
+        __builtin_memcpy(&val, src + src_off + i, 4);
+        size_t remain = size - i;
+        if (remain >= 4) {
+            __builtin_memcpy(dst + dst_off + i, &val, 4);
+        } else {
+            for (size_t b = 0; b < remain; ++b)
+                dst[dst_off + i + b] = (unsigned char)(val >> (b * 8));
+        }
+    }
+}
+
 // ===========================================================================
 // FULL DECODE, stage A (1024 threads): fused octree coded stream -> kernel-1
 // scratch layout [4096B bitmap][packed int32 values].  Exact inverse of the
 // fused encoder's value packing, so the output is byte-identical to the
 // original kernel-1 output.
 // ===========================================================================
-__launch_bounds__(1024)
-__global__ void waveletOctreeDecodeToBitmapKernel(
-    const unsigned char* __restrict__ coded,
-    const size_t* __restrict__ sig_sizes,
-    unsigned char* __restrict__ scratch1_out,
-    size_t* __restrict__ block_sizes)
+// Shared decode body: reconstruct the kernel-1 scratch layout
+// [4096B bitmap][packed int32 values] for one block from its coded bytes.
+//   blk       — pointer to the block's coded bytes ([4B mode][sig][pad][wtab][values])
+//   sig_bytes — significance-region length (octree stream length, or 4096 flat)
+//   out       — this block's WBMP_SLOT_BYTES scratch slot
+//   bsz_this  — optional: receives WBMP_BITMAP_BYTES + nnz*4 (may be null)
+// Addressing is caller-supplied so the same body serves both the fixed-stride
+// prototype kernel and the header-addressed (compacted stream) API kernel.
+__device__ __forceinline__ void woct_decode_block_to_scratch(
+    const unsigned char* __restrict__ blk, int sig_bytes,
+    unsigned char* __restrict__ out, size_t* __restrict__ bsz_this)
 {
     using namespace wbmp_opt;
-    int bid = blockIdx.x, tid = threadIdx.x;
-    const unsigned char* blk = coded + (long)bid * WOCT_CODE_SLOT_BYTES;
+    int tid = threadIdx.x;
     const unsigned char* sig = blk + WOCT_HDR_BYTES;
-    unsigned char* out = scratch1_out + (long)bid * WBMP_SLOT_BYTES;
     uint32_t* bmp_out = reinterpret_cast<uint32_t*>(out);
     int32_t*  val_out = reinterpret_cast<int32_t*>(out + WBMP_BITMAP_BYTES);
 
@@ -788,7 +856,6 @@ __global__ void waveletOctreeDecodeToBitmapKernel(
     __syncthreads();
 
     int mode = blk[0];
-    int sig_bytes = (int)sig_sizes[bid];
 
     if (mode == 0) {                            // flat masks (L order)
         const uint32_t* flat = reinterpret_cast<const uint32_t*>(sig);
@@ -857,7 +924,54 @@ __global__ void waveletOctreeDecodeToBitmapKernel(
             val_out[in_off + k] = (int)(uv << sh) >> sh;   // sign-extend from W bytes
         }
     }
-    if (tid==0) block_sizes[bid] = (size_t)WBMP_BITMAP_BYTES + (size_t)tot_nz * 4;
+    if (tid==0 && bsz_this) *bsz_this = (size_t)WBMP_BITMAP_BYTES + (size_t)tot_nz * 4;
+}
+
+// Prototype kernel: fixed-stride coded slots + per-block sig-size array.
+__launch_bounds__(1024)
+__global__ void waveletOctreeDecodeToBitmapKernel(
+    const unsigned char* __restrict__ coded,
+    const size_t* __restrict__ sig_sizes,
+    unsigned char* __restrict__ scratch1_out,
+    size_t* __restrict__ block_sizes)
+{
+    int bid = blockIdx.x;
+    woct_decode_block_to_scratch(
+        coded + (long)bid * WOCT_CODE_SLOT_BYTES, (int)sig_sizes[bid],
+        scratch1_out + (long)bid * WBMP_SLOT_BYTES, &block_sizes[bid]);
+}
+
+// Octree self-contained stream header:
+//   [int nb][int nmf][size_t offsets[nb]][uint32 sig_sizes[nb]][float mulfac[nmf]]
+__host__ __device__ inline int hipOctreeHeaderSize(int num_blocks, int num_mulfacs) {
+    return 8 + 12 * num_blocks + 4 * num_mulfacs;
+}
+
+// API decode kernel: locates each block in the compacted stream via the header
+// offset table, reads its significance length from the header sig-size table,
+// reconstructs the kernel-1 scratch layout, and (block 0) publishes
+// inv_scale = 1/mulfac for stage B.
+__launch_bounds__(1024)
+__global__ void waveletOctreeDecodeToBitmapHdrKernel(
+    const unsigned char* __restrict__ input,
+    unsigned char* __restrict__ scratch1_out,
+    float* __restrict__ inv_scale_out)
+{
+    int bid = blockIdx.x, tid = threadIdx.x;
+    const int* hdr = reinterpret_cast<const int*>(input);
+    int num_blocks  = hdr[0];
+    int num_mulfacs = hdr[1];
+    const size_t*   offsets = reinterpret_cast<const size_t*>(input + 8);
+    const uint32_t* sig_u32 = reinterpret_cast<const uint32_t*>(input + 8 + 8L * num_blocks);
+    const float*    mulfacs = reinterpret_cast<const float*>(input + 8 + 12L * num_blocks);
+    const unsigned char* data_base = input + hipOctreeHeaderSize(num_blocks, num_mulfacs);
+
+    if (bid == 0 && tid == 0 && inv_scale_out)
+        *inv_scale_out = 1.0f / mulfacs[0];
+
+    woct_decode_block_to_scratch(
+        data_base + offsets[bid], (int)sig_u32[bid],
+        scratch1_out + (long)bid * WBMP_SLOT_BYTES, nullptr);
 }
 
 inline hipError_t hipWaveletOctreeDecodeToBitmap(
@@ -876,8 +990,7 @@ inline hipError_t hipWaveletOctreeDecodeToBitmap(
 // (RLE decode) is swapped for the bitmap+value reconstruction, which reverses
 // waveletBitmapFusedKernel's Phase 4.  Requires DS79_INCLUDE_REG32.
 // ===========================================================================
-__launch_bounds__(256, 2)
-__global__ void waveletBitmapInverseFusedKernel(
+__device__ __forceinline__ void woct_bitmap_inverse_body(
     const unsigned char* __restrict__ scratch1,
     float* __restrict__ output,
     float inv_scale, int ldimx, int ldimxy)
@@ -958,6 +1071,27 @@ __global__ void waveletBitmapInverseFusedKernel(
         auto v = __builtin_bit_cast(__attribute__((__vector_size__(16))) int, regs[p]);
         __builtin_amdgcn_raw_buffer_store_b128(v, rsrc, byte_off, 0, SLC);
     }
+}
+
+// Stage B with a host-scalar inv_scale (prototype / test path).
+__launch_bounds__(256, 2)
+__global__ void waveletBitmapInverseFusedKernel(
+    const unsigned char* __restrict__ scratch1,
+    float* __restrict__ output,
+    float inv_scale, int ldimx, int ldimxy)
+{
+    woct_bitmap_inverse_body(scratch1, output, inv_scale, ldimx, ldimxy);
+}
+
+// Stage B with a device inv_scale pointer (API path): reads 1/mulfac published
+// by the header-addressed decode kernel, so no host readback is needed.
+__launch_bounds__(256, 2)
+__global__ void waveletBitmapInverseFusedDevKernel(
+    const unsigned char* __restrict__ scratch1,
+    float* __restrict__ output,
+    const float* __restrict__ inv_scale, int ldimx, int ldimxy)
+{
+    woct_bitmap_inverse_body(scratch1, output, *inv_scale, ldimx, ldimxy);
 }
 
 inline hipError_t hipWaveletBitmapInverseFused(

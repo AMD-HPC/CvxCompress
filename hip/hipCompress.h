@@ -32,6 +32,7 @@ const char* hipCompressErrorString(hipCompressError_t err);
 enum hipCompressKernel {
     HIP_COMPRESS_KERNEL_ZLINE  = 0,  // parallel z-line RLE (per-block metadata)
     HIP_COMPRESS_KERNEL_SEGRLE = 1,  // segment-aligned RLE (no metadata overhead)
+    HIP_COMPRESS_KERNEL_OCTREE = 2,  // octree significance coder (3D only)
 };
 
 struct hipCompressPlan {
@@ -47,6 +48,12 @@ struct hipCompressPlan {
     size_t* d_block_offsets;
     void* d_scan_temp;
     size_t scan_temp_bytes;
+
+    // Octree kernel only (nullptr otherwise): intermediate coded slots, per-block
+    // significance sizes, and the device inv_scale published for stage-B decode.
+    unsigned char* d_octree_coded;
+    size_t* d_octree_sig_sizes;
+    float* d_inv_scale;
 
     double* d_partial_sums;
     int     max_copy_blocks;

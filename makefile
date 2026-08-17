@@ -129,7 +129,7 @@ test_wavelet_rle_fused_hip: tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletR
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -save-temps=obj -I. -Ihip -Itests tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletTransformBuffer.cpp -L. -lcvxcompress -lm -o $(BUILDDIR)/test_wavelet_rle_fused_hip
 
 # hipCompress public API test
-test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/test_compress_api_hip
 
 # 2D compression test

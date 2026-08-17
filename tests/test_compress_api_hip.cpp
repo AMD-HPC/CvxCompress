@@ -182,6 +182,64 @@ static bool test_round_trip()
     return pass;
 }
 
+static bool test_octree_round_trip()
+{
+    printf("Test: Octree compress/decompress round-trip\n");
+    const int N = 128, total = N * N * N;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* oct = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&oct, N, N, N, 0, HIP_COMPRESS_KERNEL_OCTREE));
+    hipCompressPlan* rle = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&rle, N, N, N, 0, HIP_COMPRESS_KERNEL_ZLINE));
+
+    float* d_input = nullptr;
+    float* d_output = nullptr;
+    unsigned char* d_comp = nullptr;
+    unsigned char* d_comp_rle = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+    size_t comp_size = 0;
+    HIPCHECK(hipCompressMaxOutputSize(oct, &comp_size));
+    HIPCHECK(hipMalloc(&d_comp, comp_size));
+    size_t comp_size_rle = 0;
+    HIPCHECK(hipCompressMaxOutputSize(rle, &comp_size_rle));
+    HIPCHECK(hipMalloc(&d_comp_rle, comp_size_rle));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len = 0, len_rle = 0;
+    float cr = 0, cr_rle = 0;
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp, &len, &cr, oct));
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp_rle, &len_rle, &cr_rle, rle));
+    printf("  octree CR=%.2f (%ld B)  RLE CR=%.2f (%ld B)  gain=%.2fx\n",
+           cr, len, cr_rle, len_rle, cr_rle > 0 ? cr / cr_rle : 0.0f);
+
+    HIPCHECK(hipDecompress(d_comp, d_output, oct, 0));
+
+    std::vector<float> h_in(total), h_out(total);
+    HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_out.data(), d_output, total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float max_err = maxAbsError(h_in.data(), h_out.data(), total);
+    printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n",
+           max_err, rms, max_err / rms);
+
+    // Correctness gate: bounded reconstruction + a real compression gain. The
+    // octree-vs-RLE CR delta is a benchmark property (printed above), not a
+    // correctness invariant, so it is not part of the pass condition.
+    bool pass = (max_err < rms) && (cr > 1.0f) && (len > 0);
+    printf("  octree round-trip: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_output); hipFree(d_comp); hipFree(d_comp_rle);
+    hipCompressDestroyPlan(oct);
+    hipCompressDestroyPlan(rle);
+    return pass;
+}
+
 static bool test_cr_vs_cpu()
 {
     printf("Test 3: CR matches CPU (within z-line gap)\n");
@@ -1664,13 +1722,14 @@ static bool test_wavelet_dims_helper()
     return pass;
 }
 
-static void bench_grid_size(int nx, int ny, int nz, float scale)
+static void bench_grid_size(int nx, int ny, int nz, float scale,
+                            hipCompressKernel kernel, const char* label)
 {
     long total = (long)nx * ny * nz;
     float data_MB = (float)total * sizeof(float) / (1024.0f * 1024.0f);
 
     hipCompressPlan* plan = nullptr;
-    HIPCHECK(hipCompressCreatePlan(&plan, nx, ny, nz, 0));
+    HIPCHECK(hipCompressCreatePlan(&plan, nx, ny, nz, 0, kernel));
 
     float* d_input = nullptr;
     float* d_output = nullptr;
@@ -1715,8 +1774,8 @@ static void bench_grid_size(int nx, int ny, int nz, float scale)
     float fwd_bw = data_MB / fwd_ms * 1000.0f / 1024.0f;
     float inv_bw = data_MB / inv_ms * 1000.0f / 1024.0f;
 
-    printf("  %4dx%4dx%4d  %7.1f  %5.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
-           nx, ny, nz, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
+    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
+           nx, ny, nz, label, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
 
     hipEventDestroy(t0); hipEventDestroy(t1); hipEventDestroy(t2);
     hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
@@ -1727,8 +1786,8 @@ static void bench_throughput()
 {
     const float scale = 5e-2f;
     printf("Benchmark: API throughput, scale=%.0e, sin(40x)sin(40y)sin(40z)\n", scale);
-    printf("  %16s  %7s  %5s  %8s  %8s  %8s  %8s  %5s\n",
-           "grid", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
+    printf("  %16s  %7s  %7s  %6s  %8s  %8s  %8s  %8s  %5s\n",
+           "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
 
     int sizes[][3] = {
         {352, 416, 320},
@@ -1741,8 +1800,11 @@ static void bench_throughput()
         {512, 512, 512},
     };
 
-    for (auto& s : sizes)
-        bench_grid_size(s[0], s[1], s[2], scale);
+    // RLE (z-line) vs octree on the API path, same input and quantization.
+    for (auto& s : sizes) {
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_ZLINE,  "rle");
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE, "octree");
+    }
 }
 
 static void generateRadialSinc(float* vol, int nx, int ny, int nz,
@@ -2955,9 +3017,10 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 37;
+    int passed = 0, total = 38;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
+    if (test_octree_round_trip())           ++passed;
     if (test_cr_vs_cpu())                   ++passed;
     if (test_varying_scale())               ++passed;
     if (test_multiple_cycles())             ++passed;

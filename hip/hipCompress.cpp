@@ -8,6 +8,8 @@
 #include "hipWaveletRLE.h"
 #include "hipWaveletRLEInverse.h"
 #include "hipWaveletRLE2D.h"
+#include "hipWaveletBitmap.h"
+#include "hipWaveletOctree.h"
 #include "hipBlockCopy.h"
 
 #include <cmath>
@@ -90,11 +92,16 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
 
     if (is_2d) {
+        if (kernel == HIP_COMPRESS_KERNEL_OCTREE)  // octree is 3D only
+            PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_DIMENSIONS, hipErrorInvalidValue);
         p->num_blocks = (nx / 32) * (ny / 32);
         p->scratch_slot_stride = WRLE2D_SLOT_BYTES;
     } else {
         p->num_blocks = (nx / 32) * (ny / 32) * (nz / 32);
-        p->scratch_slot_stride = 4L * WRLE_LDS_BYTES;
+        // Octree: d_scratch holds the kernel-1 bitmap+values layout (encode: k1
+        // output; decode: stage-A output).  RLE: fixed-stride RLE slots.
+        p->scratch_slot_stride = (kernel == HIP_COMPRESS_KERNEL_OCTREE)
+                               ? (size_t)WBMP_SLOT_BYTES : 4L * WRLE_LDS_BYTES;
     }
 
     int nb = p->num_blocks;
@@ -104,6 +111,13 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     HIPCHECK_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
     HIPCHECK_PLAN(p, hipMalloc(&p->d_block_sizes, nb * sizeof(size_t)));
     HIPCHECK_PLAN(p, hipMalloc(&p->d_block_offsets, nb * sizeof(size_t)));
+
+    if (kernel == HIP_COMPRESS_KERNEL_OCTREE) {
+        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
+                                   (long)nb * WOCT_CODE_SLOT_BYTES));
+        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
+        HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
+    }
 
     p->scan_temp_bytes = 0;
     hipError_t err = hipWaveletRLECompactScanTempSize(nb, &p->scan_temp_bytes);
@@ -143,6 +157,9 @@ hipError_t hipCompressDestroyPlan(hipCompressPlan* plan)
     (void)hipFree(plan->d_scan_temp);
     (void)hipFree(plan->d_partial_sums);
     (void)hipFree(plan->d_rms);
+    (void)hipFree(plan->d_octree_coded);
+    (void)hipFree(plan->d_octree_sig_sizes);
+    (void)hipFree(plan->d_inv_scale);
     if (plan->h_staging) (void)hipHostFree(plan->h_staging);
     if (plan->ready_event) (void)hipEventDestroy(plan->ready_event);
     free(plan);
@@ -172,11 +189,13 @@ hipError_t hipCompress(
     const int ldimx = nx;
     const int nb = plan->num_blocks;
     const int num_mulfacs = 1;
-    const int hdr_size = hipCompressHeaderSize(nb, num_mulfacs);
+    const int hdr_size = (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE)
+                       ? hipOctreeHeaderSize(nb, num_mulfacs)
+                       : hipCompressHeaderSize(nb, num_mulfacs);
     hipStream_t s = user_stream;
     hipStream_t aux = plan->aux_stream;
 
-    // 1. Fused wavelet + quantize + RLE → scratch (user_stream)
+    // 1. Fused wavelet + quantize + encode → scratch (user_stream)
     if (plan->is_2d) {
         int nbx = nx / 32, nby = ny / 32;
         dim3 grid((nbx + WRLE2D_TILES_PER_WG - 1) / WRLE2D_TILES_PER_WG, nby);
@@ -187,7 +206,22 @@ hipError_t hipCompress(
     } else {
         const int ldimxy = nx * ny;
         dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-        if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
+        if (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE) {
+            // k1: wavelet ZYX + quantize → [bitmap][packed int32] in d_scratch.
+            waveletBitmapFusedKernel<<<grid, dim3(256), 0, s>>>(
+                d_input, plan->d_scratch, plan->d_block_sizes,
+                scale, ldimx, ldimxy,
+                d_rms, plan->d_mulfac);
+            // k2: octree significance + width table + packed values → coded
+            // slots.  d_block_sizes := coded length; d_octree_sig_sizes :=
+            // significance length (both per block, for scan + header).
+            waveletOctreeCodeParKernel<<<nb, dim3(WOCT_PAR_THREADS), 0, s>>>(
+                plan->d_scratch, plan->d_octree_coded,
+                plan->d_block_sizes, plan->d_octree_sig_sizes);
+            // 4-align each coded length so packed blocks keep uint32 reads
+            // (width table / flat masks) aligned in the compacted stream.
+            waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, s);
+        } else if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
             waveletSegRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
                 d_input, plan->d_scratch, plan->d_block_sizes,
                 scale, ldimx, ldimxy,
@@ -217,6 +251,11 @@ hipError_t hipCompress(
             plan->d_block_sizes, plan->d_block_offsets,
             d_output, nb, num_mulfacs, plan->d_mulfac,
             plan->scratch_slot_stride);
+    } else if (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE) {
+        woctCompactKernel<<<nb, 256, 0, aux>>>(
+            plan->d_octree_coded, d_output + hdr_size,
+            plan->d_block_sizes, plan->d_block_offsets, plan->d_octree_sig_sizes,
+            d_output, nb, num_mulfacs, plan->d_mulfac);
     } else {
         wrleCompactKernel<<<nb, 256, 0, aux>>>(
             plan->d_scratch, d_output + hdr_size,
@@ -248,7 +287,9 @@ hipError_t hipCompressSynchronize(
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int nb = plan->num_blocks;
-    const int hdr_size = hipCompressHeaderSize(nb, 1);
+    const int hdr_size = (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE)
+                       ? hipOctreeHeaderSize(nb, 1)
+                       : hipCompressHeaderSize(nb, 1);
     size_t total_payload = plan->h_staging[0] + plan->h_staging[1];
     long total_bytes = (long)hdr_size + (long)total_payload;
 
@@ -430,7 +471,16 @@ hipError_t hipDecompress(
     } else {
         const int ldimxy = nx * ny;
         dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-        if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
+        if (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE) {
+            const int nb = plan->num_blocks;
+            // stage A: compacted coded stream → kernel-1 scratch layout; also
+            // publishes inv_scale = 1/mulfac (device) for stage B.
+            waveletOctreeDecodeToBitmapHdrKernel<<<nb, dim3(WOCT_PAR_THREADS), 0, user_stream>>>(
+                d_input, plan->d_scratch, plan->d_inv_scale);
+            // stage B: dequantize + inverse wavelet ZYX → wavefield.
+            waveletBitmapInverseFusedDevKernel<<<grid, dim3(256), 0, user_stream>>>(
+                plan->d_scratch, d_output, plan->d_inv_scale, ldimx, ldimxy);
+        } else if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
             waveletSegRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
                 d_input, nullptr, nullptr,
                 d_output, 0.0f, ldimx, ldimxy, 1);
@@ -467,8 +517,15 @@ hipError_t hipCompressMaxOutputSize(const hipCompressPlan* plan, size_t* size)
         return hipErrorInvalidValue;
     }
     plan->last_error = HIP_COMPRESS_SUCCESS;
-    int hdr_size = hipCompressHeaderSize(plan->num_blocks, 1);
-    size_t raw = (size_t)hdr_size + (size_t)plan->num_blocks * plan->scratch_slot_stride;
+    size_t raw;
+    if (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE) {
+        // Worst case: octree header + every block at its coded-slot upper bound.
+        int hdr_size = hipOctreeHeaderSize(plan->num_blocks, 1);
+        raw = (size_t)hdr_size + (size_t)plan->num_blocks * WOCT_CODE_SLOT_BYTES;
+    } else {
+        int hdr_size = hipCompressHeaderSize(plan->num_blocks, 1);
+        raw = (size_t)hdr_size + (size_t)plan->num_blocks * plan->scratch_slot_stride;
+    }
     // Include the 8B round-up slack applied to compressed_length so a buffer
     // sized from this value can always hold the padded stream.
     *size = (raw + 7) & ~(size_t)7;
