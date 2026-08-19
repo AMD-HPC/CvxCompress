@@ -80,12 +80,13 @@ static void launch_rle_inv(void* p){ Ctx*c=(Ctx*)p; dim3 g(c->nbx,c->nby,c->nbz)
     waveletRLEInverseFusedKernel<<<g,dim3(256)>>>(c->d_rle,c->d_rle_sizes,nullptr,c->d_field_rle,1.0f/c->mulfac,c->ldimx,c->ldimxy,0); }
 
 static bool load_center_crop(const std::string& path,int gnz,int gny,int gnx,
-                             int cz,int cy,int cx,std::vector<float>& out){
+                             int cz,int cy,int cx,std::vector<float>& out,
+                             int z0=-1,int y0=-1,int x0=-1){
     FILE* f=std::fopen(path.c_str(),"rb"); if(!f){printf("open fail %s\n",path.c_str());return false;}
     std::vector<float> full((size_t)gnz*gny*gnx);
     size_t r=std::fread(full.data(),sizeof(float),full.size(),f); std::fclose(f);
     if(r!=full.size()){printf("short read %s\n",path.c_str());return false;}
-    int oz=(gnz-cz)/2,oy=(gny-cy)/2,ox=(gnx-cx)/2;
+    int oz=(z0>=0)?z0:(gnz-cz)/2,oy=(y0>=0)?y0:(gny-cy)/2,ox=(x0>=0)?x0:(gnx-cx)/2;
     out.resize((size_t)cz*cy*cx);
     for(int k=0;k<cz;++k)for(int j=0;j<cy;++j){
         const float* s=&full[((size_t)(oz+k)*gny+(oy+j))*gnx+ox];
@@ -101,13 +102,16 @@ static bool load_center_crop(const std::string& path,int gnz,int gny,int gnx,
 int main(int argc,char** argv){
     setvbuf(stdout,NULL,_IONBF,0);
     std::string panel;
-    int NX=256; float mulfac=8.0f; int iters=100; int enc_threads=256;
+    int NX=256; float mulfac=8.0f; int iters=100; int enc_threads=256; int z0=-1,y0=-1,x0=-1;
     for(int i=1;i<argc;++i){
         if(!std::strcmp(argv[i],"--panel")&&i+1<argc) panel=argv[++i];
         else if(!std::strcmp(argv[i],"--nx")&&i+1<argc) NX=atoi(argv[++i]);
         else if(!std::strcmp(argv[i],"--scale")&&i+1<argc) mulfac=(float)atof(argv[++i]);
         else if(!std::strcmp(argv[i],"--iters")&&i+1<argc) iters=atoi(argv[++i]);
         else if(!std::strcmp(argv[i],"--enc-threads")&&i+1<argc) enc_threads=atoi(argv[++i]);
+        else if(!std::strcmp(argv[i],"--z0")&&i+1<argc) z0=atoi(argv[++i]);
+        else if(!std::strcmp(argv[i],"--y0")&&i+1<argc) y0=atoi(argv[++i]);
+        else if(!std::strcmp(argv[i],"--x0")&&i+1<argc) x0=atoi(argv[++i]);
     }
     if(NX%32){printf("NX must be multiple of 32\n");return 1;}
     Ctx c; c.NX=NX;c.NY=NX;c.NZ=NX;c.mulfac=mulfac;c.enc_threads=enc_threads;
@@ -116,7 +120,7 @@ int main(int argc,char** argv){
 
     std::vector<float> h_in(nelem);
     if(!panel.empty()){
-        if(!load_center_crop(panel,512,512,512,NX,NX,NX,h_in)) return 1;
+        if(!load_center_crop(panel,512,512,512,NX,NX,NX,h_in,z0,y0,x0)) return 1;
     } else {
         for(size_t i=0;i<nelem;++i){int x=(int)(i%NX),y=(int)((i/NX)%NX),z=(int)(i/((size_t)NX*NX));
             float s=sinf(0.11f*x)*cosf(0.07f*y)*sinf(0.05f*z);
@@ -261,21 +265,12 @@ int main(int argc,char** argv){
             for(int L=0;L<1024;++L) if(fflat[L]!=bmp[L]){ if(fus_sig_mism<10)
                 printf("  [fusSig] blk %d flat L %d %u!=%u\n",bid,L,fflat[L],bmp[L]); ++fus_sig_mism; break; }
         }
-        // width table + values vs the two-level reference regions
-        long tl_wtab_off = WBMP_OCC_BYTES + 4L*ne;
-        long tl_wtab_len = (2L*ne + 7)/8;
-        long tl_vals_off = tl_wtab_off + tl_wtab_len;
-        long val_len     = (long)h_codetl_sizes[bid] - tl_vals_off;
-        const unsigned char* codetl = h_codetl.data()+(long)bid*WBMP_TL_SLOT_BYTES;
-        long wtab_base = (WOCT_HDR_BYTES + fsig + 3) & ~3L;
-        long vals_base = wtab_base + tl_wtab_len;
-        if(tl_wtab_len>0 && memcmp(blkc+wtab_base, codetl+tl_wtab_off, tl_wtab_len)!=0){
-            if(fus_wtab_mism<10) printf("  [fusWtab] blk %d differ (ne=%d)\n",bid,ne); ++fus_wtab_mism; }
-        if(val_len>0 && memcmp(blkc+vals_base, codetl+tl_vals_off, val_len)!=0){
-            if(fus_val_mism<10) printf("  [fusVal] blk %d differ (len=%ld)\n",bid,val_len); ++fus_val_mism; }
-        long fexp = vals_base + val_len;
-        if((long)h_octc_sizes[bid]!=fexp){ if(fus_size_mism<10)
-            printf("  [fusSize] blk %d got %ld exp %ld\n",bid,(long)h_octc_sizes[bid],fexp); ++fus_size_mism; }
+        // NOTE: the fused kernel-2 now uses a per-block PFOR value coder (not the
+        // legacy per-line width table).  Its value round-trip is validated
+        // format-agnostically by the stage-A decode gate (decA_mism) below, so the
+        // old wtab/values/size byte-exact comparisons vs the two-level reference no
+        // longer apply.  Only the measured coded size is kept (for the fused CR).
+        (void)fsig;
         fus_block_total += (long)h_octc_sizes[bid];
         const unsigned char* blk = h_oct.data()+(long)bid*WOCT_SLOT_BYTES;
         int mode = blk[0];
@@ -363,15 +358,14 @@ int main(int argc,char** argv){
            lm_cnt_mism?"MISMATCH":"OK", lm_cnt_mism, lm_rt_mism?"MISMATCH":"OK", lm_rt_mism);
     printf("parallel GPU: byte-exact vs host LM: %s (%ld)   round-trip masks: %s (%ld)\n",
            par_enc_mism?"MISMATCH":"OK", par_enc_mism, par_rt_mism?"MISMATCH":"OK", par_rt_mism);
-    printf("fused kernel-2: sig=%s(%ld) wtab=%s(%ld) values=%s(%ld) size=%s(%ld)\n",
-           fus_sig_mism?"MISMATCH":"OK",fus_sig_mism, fus_wtab_mism?"MISMATCH":"OK",fus_wtab_mism,
-           fus_val_mism?"MISMATCH":"OK",fus_val_mism, fus_size_mism?"MISMATCH":"OK",fus_size_mism);
+    printf("fused kernel-2 (PFOR value coder): sig=%s(%ld)  values: round-trip via decA gate below\n",
+           fus_sig_mism?"MISMATCH":"OK",fus_sig_mism);
+    (void)fus_wtab_mism; (void)fus_val_mism; (void)fus_size_mism;
     printf("decode: stage-A round-trip (bytes vs kernel-1): %s (%ld)\n", decA_mism?"MISMATCH":"OK", decA_mism);
     printf("distortion vs original (rel_l2): octree=%.4e  RLE=%.4e  | octree-vs-RLE field maxdiff=%.3e (%ld voxels, codec f32-escape delta)\n",
            rel_l2_oct, rel_l2_rle, field_maxdiff, field_mism);
     total_mism += lm_cnt_mism + lm_rt_mism + par_enc_mism + par_rt_mism
-                + fus_sig_mism + fus_wtab_mism + fus_val_mism + fus_size_mism
-                + decA_mism;
+                + fus_sig_mism + decA_mism;
     if(total_mism){ printf("FAIL\n"); return 1; }
     printf("PASS\n");
     return 0;

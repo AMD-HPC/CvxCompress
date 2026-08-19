@@ -187,12 +187,76 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
 
 ### Kernel Variants
 
-| Variant | Enum | Description |
-|---------|------|-------------|
-| Z-line  | `HIP_COMPRESS_KERNEL_ZLINE` | Parallel z-line RLE with per-block metadata (default) |
-| Seg-RLE | `HIP_COMPRESS_KERNEL_SEGRLE` | Segment-aligned RLE, no metadata overhead (unoptimized) |
+| Variant | Enum | Dims | Description |
+|---------|------|------|-------------|
+| Auto      | `HIP_COMPRESS_KERNEL_AUTO`     | 2D/3D | **Default.** Dimensionality-selected: resolves to quadtree for 2D (`nz == 1`) and octree for 3D at plan creation, falling back to z-line for configurations the structured coders cannot handle |
+| Z-line    | `HIP_COMPRESS_KERNEL_ZLINE`    | 2D/3D | Parallel z-line RLE with per-block metadata. Highest encode throughput; the throughput hedge for encode-bound paths (e.g. per-timestep RTM checkpoint spilling) |
+| Seg-RLE   | `HIP_COMPRESS_KERNEL_SEGRLE`   | 3D    | Segment-aligned RLE, no metadata overhead (unoptimized) |
+| Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding. Best compression ratio and fastest decode; recommended for storage/archival |
+| Quadtree  | `HIP_COMPRESS_KERNEL_QUADTREE` | 2D    | Quadtree significance coder with per-block PFOR value coding -- the 2D counterpart of octree |
+| Two-level | `HIP_COMPRESS_KERNEL_TWOLEVEL` | 3D    | Two-level occupancy + per-line width coder. Higher encode throughput than octree at a lower ratio; a hedge for compute/bandwidth-bound, rewrite-heavy paths |
 
-Select at plan creation: `hipCompressCreatePlan(&plan, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_SEGRLE)`.
+The codec is selected **at runtime, per plan** via the last argument of
+`hipCompressCreatePlan` — it is an ordinary function parameter, so switching
+between codecs requires **no recompilation** of the library or the application:
+
+```cpp
+// default (kernel arg omitted) → auto: octree for 3D, quadtree for 2D
+hipCompressCreatePlan(&plan_def, nx, ny, nz, aux);
+
+// storage-oriented volume → octree (best ratio) — explicit form of the 3D default
+hipCompressCreatePlan(&plan_oct, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_OCTREE);
+
+// encode-bound / high-rate path → z-line (fastest encode)
+hipCompressCreatePlan(&plan_zl,  nx, ny, nz, aux, HIP_COMPRESS_KERNEL_ZLINE);
+```
+
+The codec is bound to the plan (internal buffer sizes and stream header layout
+differ per codec), so the switching granularity is "which plan you create"; an
+existing plan's codec cannot be changed in place. Octree and two-level are 3D
+only, quadtree is 2D only — requesting one for the wrong dimensionality fails
+plan creation with `HIP_COMPRESS_ERROR_INVALID_DIMENSIONS`. `AUTO` avoids this
+by resolving to the dimensionality-appropriate coder at plan creation.
+
+**Choosing a codec.** The `AUTO` default maximizes compression ratio and decode
+throughput and is the right choice for storage/archival and read-heavy paths.
+For **encode-bound** paths that compress on a hot loop — e.g. per-timestep RTM
+checkpoint spilling — prefer `ZLINE`, which has the highest encode throughput.
+The octree/quadtree encode cost over z-line is small at production grid sizes
+(~1–3% at 512³) but grows at small grids where the per-block histogram, scans,
+and PFOR bookkeeping are not amortized (see `OCTREE_PFOR_THROUGHPUT.md`).
+
+**Memory footprint.** Octree/quadtree allocate a larger per-block scratch stride
+(`WOCT_CODE_SLOT_BYTES` ~140 KB/block plus the bitmap scratch) than z-line;
+these are global HBM buffers (not LDS). Negligible on MI300X/MI355X but worth
+noting for very large volumes.
+
+#### Two-level: architecture-selected encoder
+
+The two-level codec has two encoders that emit a **byte-identical** stream:
+
+- an LDS-staged **opt** encoder (~131 KB LDS) that requires CDNA4 (gfx950,
+  e.g. MI355x), and
+- a **portable** encoder used on every other architecture (gfx942/MI300x,
+  gfx90a, …).
+
+The encoder is chosen automatically at plan creation from the device
+architecture (`gcnArchName`); no user action is required. Because the streams
+are identical, a volume encoded on one GPU decodes correctly on any other, and
+the single-arch-independent decoder runs everywhere.
+
+For this automatic selection to reach the fast path, the library `.so` must
+have been built with the target architecture(s) included — build once as a fat
+binary covering your deployment GPUs and no per-user recompile is ever needed:
+
+```bash
+make libhipcvxcompress.so HIP_ARCH="gfx90a gfx942 gfx950"
+```
+
+`HIP_ARCH` accepts a space-separated list; each architecture is expanded to a
+`--offload-arch=` flag. The opt encoder is compiled only into the gfx950 device
+image (a no-op stub elsewhere), so the fat binary carries both, and the HIP
+loader plus the runtime dispatch pick the correct one for the GPU in use.
 
 ### Two-Stream Model
 
@@ -237,11 +301,13 @@ hip/
   hipWaveletRLEInverse.h         Fused inverse RLE + wavelet kernels
   hipRLEDecode.h                 Z-line RLE decoder
   hipSegmentedRLE.h              Segment-aligned RLE encode/decode
+  hipWaveletBitmap.h             Bitmap significance split + two-level coder/decoder
+  hipWaveletOctree.h             Octree significance coder + shared inverse stage
   ds79.h                         DS 7/9 wavelet filter coefficients and transforms
   ds79_reg32.inc                 Unrolled forward wavelet (32-point)
   us79_reg32.inc                 Unrolled inverse wavelet (32-point)
 tests/
-  test_compress_api_hip.cpp      API test suite (37 tests + benchmarks)
+  test_compress_api_hip.cpp      API test suite (39 tests + benchmarks)
   example_async_pipeline.cpp     Async overlap example
 ```
 

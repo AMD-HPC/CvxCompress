@@ -97,8 +97,9 @@ static bool test_plan_lifecycle()
     if (err == hipSuccess) { printf("  FAIL: should reject nx=100\n"); hipCompressDestroyPlan(plan); return false; }
     printf("  reject non-32-multiple: PASS\n");
 
-    // MaxOutputSize
-    err = hipCompressCreatePlan(&plan, 64, 64, 64, 0);
+    // MaxOutputSize (ZLINE bound formula -- pin the codec so the expected value
+    // is codec-specific and independent of the dimensionality-selected default)
+    err = hipCompressCreatePlan(&plan, 64, 64, 64, 0, HIP_COMPRESS_KERNEL_ZLINE);
     if (err != hipSuccess) { printf("  FAIL: create 64^3 plan\n"); return false; }
     size_t max_sz = 0;
     HIPCHECK(hipCompressMaxOutputSize(plan, &max_sz));
@@ -240,6 +241,64 @@ static bool test_octree_round_trip()
     return pass;
 }
 
+static bool test_twolevel_round_trip()
+{
+    printf("Test: Two-level compress/decompress round-trip\n");
+    const int N = 128, total = N * N * N;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* tl = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&tl, N, N, N, 0, HIP_COMPRESS_KERNEL_TWOLEVEL));
+    hipCompressPlan* rle = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&rle, N, N, N, 0, HIP_COMPRESS_KERNEL_ZLINE));
+    printf("  encoder: %s (gfx950 opt path %s)\n",
+           tl->tl_use_opt ? "opt" : "portable",
+           tl->tl_use_opt ? "active" : "fallback");
+
+    float* d_input = nullptr;
+    float* d_output = nullptr;
+    unsigned char* d_comp = nullptr;
+    unsigned char* d_comp_rle = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+    size_t comp_size = 0;
+    HIPCHECK(hipCompressMaxOutputSize(tl, &comp_size));
+    HIPCHECK(hipMalloc(&d_comp, comp_size));
+    size_t comp_size_rle = 0;
+    HIPCHECK(hipCompressMaxOutputSize(rle, &comp_size_rle));
+    HIPCHECK(hipMalloc(&d_comp_rle, comp_size_rle));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len = 0, len_rle = 0;
+    float cr = 0, cr_rle = 0;
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp, &len, &cr, tl));
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp_rle, &len_rle, &cr_rle, rle));
+    printf("  two-level CR=%.2f (%ld B)  RLE CR=%.2f (%ld B)  gain=%.2fx\n",
+           cr, len, cr_rle, len_rle, cr_rle > 0 ? cr / cr_rle : 0.0f);
+
+    HIPCHECK(hipDecompress(d_comp, d_output, tl, 0));
+
+    std::vector<float> h_in(total), h_out(total);
+    HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_out.data(), d_output, total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float max_err = maxAbsError(h_in.data(), h_out.data(), total);
+    printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n",
+           max_err, rms, max_err / rms);
+
+    bool pass = (max_err < rms) && (cr > 1.0f) && (len > 0);
+    printf("  two-level round-trip: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_output); hipFree(d_comp); hipFree(d_comp_rle);
+    hipCompressDestroyPlan(tl);
+    hipCompressDestroyPlan(rle);
+    return pass;
+}
+
 static bool test_cr_vs_cpu()
 {
     printf("Test 3: CR matches CPU (within z-line gap)\n");
@@ -247,9 +306,10 @@ static bool test_cr_vs_cpu()
     const float scale = 5e-2f;
     const int bx = 32, by = 32, bz = 32;
 
-    // GPU compress
+    // GPU compress -- this test measures the z-line codec's CR against the CPU
+    // reference, so pin ZLINE explicitly (the default is now dimensionality-selected).
     hipCompressPlan* plan = nullptr;
-    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0, HIP_COMPRESS_KERNEL_ZLINE));
 
     float* d_input = nullptr;
     unsigned char* d_compressed = nullptr;
@@ -1800,10 +1860,12 @@ static void bench_throughput()
         {512, 512, 512},
     };
 
-    // RLE (z-line) vs octree on the API path, same input and quantization.
+    // RLE (z-line) vs octree vs two-level on the API path, same input and
+    // quantization.  Two-level uses the arch-selected encoder (opt on gfx950).
     for (auto& s : sizes) {
-        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_ZLINE,  "rle");
-        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE, "octree");
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_ZLINE,    "rle");
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,   "octree");
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_TWOLEVEL, "twolvl");
     }
 }
 
@@ -3017,10 +3079,11 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 38;
+    int passed = 0, total = 39;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
     if (test_octree_round_trip())           ++passed;
+    if (test_twolevel_round_trip())         ++passed;
     if (test_cr_vs_cpu())                   ++passed;
     if (test_varying_scale())               ++passed;
     if (test_multiple_cycles())             ++passed;

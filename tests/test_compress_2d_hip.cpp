@@ -331,6 +331,87 @@ static bool test_round_trip_with_copy_2d()
     return pass;
 }
 
+// 2D quadtree significance coder: round-trip correctness + bit-exact match to
+// the RLE 2D path (both use the same transform/quantizer, so at equal scale the
+// reconstructed field must be identical) + reported CR for each codec.
+static bool test_quadtree_2d_round_trip()
+{
+    printf("Test 6: 2D quadtree codec round-trip + RLE equivalence\n");
+    const int NX = 256, NY = 256, total = NX * NY;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* p_rle = nullptr;
+    hipCompressPlan* p_qt  = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&p_rle, NX, NY, 1, 0, HIP_COMPRESS_KERNEL_ZLINE));
+    hipError_t err = hipCompressCreatePlan(&p_qt, NX, NY, 1, 0, HIP_COMPRESS_KERNEL_QUADTREE);
+    if (err != hipSuccess || !p_qt) {
+        printf("  FAIL: create quadtree plan: %s\n", hipGetErrorString(err));
+        return false;
+    }
+
+    // Quadtree must be rejected for 3D dims.
+    hipCompressPlan* p_bad = nullptr;
+    if (hipCompressCreatePlan(&p_bad, 64, 64, 64, 0, HIP_COMPRESS_KERNEL_QUADTREE) == hipSuccess) {
+        printf("  FAIL: quadtree accepted for 3D\n");
+        hipCompressDestroyPlan(p_bad);
+        return false;
+    }
+    printf("  reject quadtree for 3D: PASS\n");
+
+    float* d_input = nullptr;
+    float* d_out_rle = nullptr;
+    float* d_out_qt = nullptr;
+    unsigned char* d_comp_rle = nullptr;
+    unsigned char* d_comp_qt = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out_rle, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out_qt, total * sizeof(float)));
+    size_t comp_rle = 0, comp_qt = 0;
+    HIPCHECK(hipCompressMaxOutputSize(p_rle, &comp_rle));
+    HIPCHECK(hipCompressMaxOutputSize(p_qt, &comp_qt));
+    HIPCHECK(hipMalloc(&d_comp_rle, comp_rle));
+    HIPCHECK(hipMalloc(&d_comp_qt, comp_qt));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSin2DKernel<<<blocks, threads>>>(d_input, NX, NY, 24.0f, 24.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len_rle = 0, len_qt = 0;
+    float cr_rle = 0, cr_qt = 0;
+    HIPCHECK(compressWithAutoRMS2D(scale, d_input, d_comp_rle, &len_rle, &cr_rle, p_rle));
+    HIPCHECK(compressWithAutoRMS2D(scale, d_input, d_comp_qt,  &len_qt,  &cr_qt,  p_qt));
+    printf("  RLE      : CR=%.2f, %ld bytes\n", cr_rle, len_rle);
+    printf("  quadtree : CR=%.2f, %ld bytes\n", cr_qt, len_qt);
+
+    HIPCHECK(hipDecompress(d_comp_rle, d_out_rle, p_rle, 0));
+    HIPCHECK(hipDecompress(d_comp_qt,  d_out_qt,  p_qt,  0));
+    HIPCHECK(hipDeviceSynchronize());
+
+    std::vector<float> h_in(total), h_rle(total), h_qt(total);
+    HIPCHECK(hipMemcpy(h_in.data(),  d_input,   total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_rle.data(), d_out_rle, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_qt.data(),  d_out_qt,  total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float qt_err = maxAbsError(h_in.data(), h_qt.data(), total);
+    float vs_rle = maxAbsError(h_rle.data(), h_qt.data(), total);
+    printf("  quadtree vs input: max_err=%.6e (rms=%.6e, rel=%.6e)\n", qt_err, rms, qt_err / rms);
+    printf("  quadtree vs RLE  : max_err=%.6e (float-epsilon of RLE path)\n", vs_rle);
+
+    // The quadtree path shares the RLE transform/quantizer, so it must match the
+    // RLE reconstruction to within float rounding (the two inverse kernels are the
+    // same algorithm but the compiler contracts FP independently) -- i.e. far
+    // below the quantization error.  Require the codecs agree to <1e-4 abs.
+    bool pass = (qt_err < rms) && (cr_qt > 1.0f) && (vs_rle < 1e-4f);
+    printf("  quadtree 2D: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_out_rle); hipFree(d_out_qt);
+    hipFree(d_comp_rle); hipFree(d_comp_qt);
+    hipCompressDestroyPlan(p_rle);
+    hipCompressDestroyPlan(p_qt);
+    return pass;
+}
+
 int main()
 {
     printf("=== 2D Compression Tests ===\n\n");
@@ -347,6 +428,8 @@ int main()
     total++; if (test_copy_to_from_2d()) passed++;
     printf("\n");
     total++; if (test_round_trip_with_copy_2d()) passed++;
+    printf("\n");
+    total++; if (test_quadtree_2d_round_trip()) passed++;
     printf("\n");
 
     printf("=== Results: %d/%d passed ===\n", passed, total);

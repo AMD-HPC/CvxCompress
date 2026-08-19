@@ -125,7 +125,8 @@ __global__ void waveletRLEFusedKernel(
     float scale,
     int ldimx, int ldimxy,
     const double* __restrict__ d_rms,
-    float* __restrict__ d_mulfac_out)
+    float* __restrict__ d_mulfac_out,
+    float* __restrict__ d_coef_out = nullptr)
 {
     constexpr int PLANES = 32;
     constexpr int BATCH  = 8;
@@ -257,6 +258,22 @@ __global__ void waveletRLEFusedKernel(
         block_total += pass_total;
     }
 
+    // ---- Optional: dump pre-quant wavelet coefficients (debug/validation) ----
+    // regs still holds the Phase-3 ZYX coefficients (the RLE pass reads them as
+    // const).  Write them in the same [gx,gy,z] layout as the input, before any
+    // quantization.  Zero cost when d_coef_out == nullptr.
+    if (d_coef_out) {
+        #pragma unroll
+        for (int p = 0; p < PLANES; p++) {
+            size_t base = (size_t)(blockIdx.z * 32 + p) * ldimxy
+                        + (size_t)gy * ldimx + gx;
+            d_coef_out[base + 0] = regs[p][0];
+            d_coef_out[base + 1] = regs[p][1];
+            d_coef_out[base + 2] = regs[p][2];
+            d_coef_out[base + 3] = regs[p][3];
+        }
+    }
+
     if (tid == 0)
         block_sizes[bid] = WRLE_META_PER_BLOCK + block_total;
 }
@@ -272,7 +289,26 @@ inline hipError_t hipWaveletRLEFused(
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
     waveletRLEFusedKernel<<<grid, dim3(256)>>>(
         input, output, block_sizes, scale, ldimx, ldimxy,
-        nullptr, nullptr);
+        nullptr, nullptr, nullptr);
+    return hipGetLastError();
+}
+
+// Debug/validation: run the production fused kernel and additionally write the
+// pre-quant ZYX wavelet coefficients to d_coef_out (same layout as input).
+// Uses mulfac = scale directly (d_rms == nullptr), matching hipWaveletRLEFused.
+inline hipError_t hipWaveletRLEFusedDumpCoef(
+    const float* input,
+    unsigned char* output,
+    size_t* block_sizes,
+    float* d_coef_out,
+    float scale,
+    int nx, int ny, int nz,
+    int ldimx, int ldimxy)
+{
+    dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
+    waveletRLEFusedKernel<<<grid, dim3(256)>>>(
+        input, output, block_sizes, scale, ldimx, ldimxy,
+        nullptr, nullptr, d_coef_out);
     return hipGetLastError();
 }
 
@@ -296,12 +332,15 @@ __global__ void waveletRLEFusedSaddrKernel(
     float scale,
     int ldimx, int ldimxy,
     const double* __restrict__ d_rms,
-    float* __restrict__ d_mulfac_out)
+    float* __restrict__ d_mulfac_out,
+    float* __restrict__ d_coef_out = nullptr)   // kept for signature parity with
+                                                // waveletRLEFusedKernel (unused)
 {
     constexpr int PLANES = 32;
     constexpr int BATCH  = 8;
     constexpr int NTHREADS = 256;
     using BlockScan = rocprim::block_scan<int, NTHREADS>;
+    (void)d_coef_out;
 
     __shared__ union {
         float wavelet[BATCH * 1024];
@@ -519,7 +558,7 @@ inline hipError_t hipWaveletRLEFusedCompact(
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
     waveletRLEFusedKernel<<<grid, dim3(256), 0, stream>>>(
         input, scratch, block_sizes, scale, ldimx, ldimxy,
-        nullptr, nullptr);
+        nullptr, nullptr, nullptr);
 
     hipError_t err = rocprim::exclusive_scan(
         scan_temp, scan_temp_bytes,

@@ -30,9 +30,20 @@ hipCompressError_t hipCompressGetLastError(const hipCompressPlan* plan);
 const char* hipCompressErrorString(hipCompressError_t err);
 
 enum hipCompressKernel {
-    HIP_COMPRESS_KERNEL_ZLINE  = 0,  // parallel z-line RLE (per-block metadata)
-    HIP_COMPRESS_KERNEL_SEGRLE = 1,  // segment-aligned RLE (no metadata overhead)
-    HIP_COMPRESS_KERNEL_OCTREE = 2,  // octree significance coder (3D only)
+    HIP_COMPRESS_KERNEL_ZLINE    = 0,  // parallel z-line RLE (per-block metadata)
+    HIP_COMPRESS_KERNEL_SEGRLE   = 1,  // segment-aligned RLE (no metadata overhead)
+    HIP_COMPRESS_KERNEL_OCTREE   = 2,  // octree significance coder (3D only)
+    HIP_COMPRESS_KERNEL_TWOLEVEL = 3,  // two-level occupancy+width coder (3D only).
+                                       // Encoder is arch-selected: the LDS-staged
+                                       // opt kernel on gfx950, the portable kernel
+                                       // on gfx942/gfx90a (byte-identical stream).
+    HIP_COMPRESS_KERNEL_QUADTREE = 4,  // quadtree significance coder (2D only) --
+                                       // the 2D counterpart of OCTREE.
+    HIP_COMPRESS_KERNEL_AUTO     = 5,  // dimensionality-selected default: resolves
+                                       // to QUADTREE for 2D (nz == 1) and OCTREE
+                                       // for 3D at plan creation, falling back to
+                                       // ZLINE for configurations the structured
+                                       // coders cannot handle.
 };
 
 struct hipCompressPlan {
@@ -49,11 +60,20 @@ struct hipCompressPlan {
     void* d_scan_temp;
     size_t scan_temp_bytes;
 
-    // Octree kernel only (nullptr otherwise): intermediate coded slots, per-block
-    // significance sizes, and the device inv_scale published for stage-B decode.
+    // Octree / two-level / quadtree kernels only (nullptr otherwise):
+    // d_octree_coded is the fixed-stride intermediate coded buffer (octree slot
+    // for OCTREE, two-level slot for TWOLEVEL, quadtree slot for QUADTREE);
+    // d_octree_sig_sizes is the per-block significance-size table (OCTREE and
+    // QUADTREE; nullptr for TWOLEVEL -- its stream is self-describing);
+    // d_inv_scale is the device inv_scale published for stage-B decode.
     unsigned char* d_octree_coded;
     size_t* d_octree_sig_sizes;
     float* d_inv_scale;
+
+    // TWOLEVEL only: true on gfx950 to launch the LDS-staged opt encoder, false
+    // elsewhere to launch the portable encoder.  Set once at plan creation from
+    // the device arch; both encoders emit the identical two-level stream.
+    bool tl_use_opt;
 
     double* d_partial_sums;
     int     max_copy_blocks;
@@ -89,7 +109,7 @@ hipError_t hipCompressCreatePlan(
     hipCompressPlan** plan,
     int nx, int ny, int nz,
     hipStream_t aux_stream,
-    hipCompressKernel kernel = HIP_COMPRESS_KERNEL_ZLINE);
+    hipCompressKernel kernel = HIP_COMPRESS_KERNEL_AUTO);
 
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 

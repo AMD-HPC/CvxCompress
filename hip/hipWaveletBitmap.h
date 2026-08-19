@@ -652,6 +652,14 @@ __global__ void waveletBitmapCodeTwoLevelOptKernel(
     unsigned char* __restrict__ out,
     size_t* __restrict__ block_sizes2)
 {
+// This kernel stages the whole per-block value payload in LDS
+// (WBMP_OPT_VBUF ~= 131 KB), which fits only CDNA4 (gfx950, 160 KB LDS).  On
+// every other target (gfx942/gfx90a: 64 KB LDS, and the host pass) it compiles
+// to an empty stub so the translation unit builds portably; the host dispatch
+// (hipCompress) only ever launches it on gfx950 and falls back to
+// waveletBitmapCodeTwoLevelKernel elsewhere.  Both kernels emit byte-identical
+// two-level streams, so the decoder is arch-independent.
+#if defined(__gfx950__)
     using namespace wbmp_opt;
     (void)block_sizes1;  // recomputed from the bitmap, kept for signature parity
     __shared__ int warp_part[2 * WBMP_OPT_NWARPS];
@@ -747,6 +755,9 @@ __global__ void waveletBitmapCodeTwoLevelOptKernel(
     }
 
     if (tid == 0) block_sizes2[bid] = (size_t)used;
+#else
+    (void)scratch1; (void)block_sizes1; (void)out; (void)block_sizes2;
+#endif  // __gfx950__
 }
 
 inline hipError_t hipWaveletBitmapCodeTwoLevelOpt(
@@ -760,6 +771,141 @@ inline hipError_t hipWaveletBitmapCodeTwoLevelOpt(
     waveletBitmapCodeTwoLevelOptKernel<<<nblocks, dim3(wbmp_opt::WBMP_OPT_THREADS), 0, stream>>>(
         scratch1, block_sizes1, out, block_sizes2);
     return hipGetLastError();
+}
+
+// ===========================================================================
+// TWO-LEVEL codec: compaction + full decode for the public hipCompress API.
+// ===========================================================================
+// Compaction for the two-level coder: copies each variable-length coded block
+// from the fixed-stride (WBMP_TL_SLOT_BYTES) intermediate into a tightly packed
+// payload using the exclusive-scan offsets, and writes the self-contained
+// RLE-style header (block offsets + mulfac).  The two-level format is fully
+// self-describing -- popcount(occupancy) recovers every region base -- so unlike
+// the octree stream it needs no per-block significance-size table; the header is
+// exactly hipCompressHeaderSize(nb, nmf).  dst points to the payload (after the
+// header).  Mirrors woctCompactKernel / wrleCompactKernel.
+__global__ void wtlCompactKernel(
+    const unsigned char* __restrict__ src,
+    unsigned char* __restrict__ dst,
+    const size_t* __restrict__ block_sizes,
+    const size_t* __restrict__ offsets,
+    unsigned char* __restrict__ hdr,
+    int num_blocks,
+    int num_mulfacs,
+    const float* __restrict__ d_mulfac)
+{
+    int bid = blockIdx.x;
+    int tid = threadIdx.x;
+    size_t size = block_sizes[bid];
+    size_t dst_off = offsets[bid];
+    size_t src_off = (size_t)bid * WBMP_TL_SLOT_BYTES;
+
+    if (hdr != nullptr && tid == 0) {
+        ((size_t*)(hdr + 8))[bid] = offsets[bid];
+        if (bid == 0) {
+            ((int*)hdr)[0] = num_blocks;
+            ((int*)hdr)[1] = num_mulfacs;
+            float* mf_dst = (float*)(hdr + 8 + 8L * num_blocks);
+            for (int i = 0; i < num_mulfacs; ++i)
+                mf_dst[i] = d_mulfac[i];
+        }
+    }
+
+    for (size_t i = tid * 4; i < size; i += blockDim.x * 4) {
+        unsigned val;
+        __builtin_memcpy(&val, src + src_off + i, 4);
+        size_t remain = size - i;
+        if (remain >= 4) {
+            __builtin_memcpy(dst + dst_off + i, &val, 4);
+        } else {
+            for (size_t b = 0; b < remain; ++b)
+                dst[dst_off + i + b] = (unsigned char)(val >> (b * 8));
+        }
+    }
+}
+
+// Two-level decode (stage A): reconstructs the kernel-1 scratch layout
+// [4096B bitmap (L order)][packed int32 values] for one block from its coded
+// bytes [128B occupancy][4B*n_ne masks][2b/nonempty-line widths][values].
+// Exact inverse of the two-level coder's packing, so the output is byte-
+// identical to the waveletBitmapFusedKernel (kernel-1) output and feeds the
+// shared inverse-wavelet stage B unchanged.  One workgroup of 1024 threads per
+// block, one z-line (L index) per thread.  Portable: only wave64 DPP block
+// scans, no arch-specific LDS budget (~128 B shared), so it runs on gfx90a/
+// gfx942/gfx950 alike regardless of which encoder produced the stream.
+//   blk — pointer to the block's coded bytes (4-byte aligned)
+//   out — this block's WBMP_SLOT_BYTES scratch slot
+__device__ __forceinline__ void wtl_decode_block_to_scratch(
+    const unsigned char* __restrict__ blk,
+    unsigned char* __restrict__ out)
+{
+    using namespace wbmp_opt;
+    const int tid = threadIdx.x;                       // L index in [0,1024)
+    __shared__ int warp_part[2 * WBMP_OPT_NWARPS];
+
+    const uint32_t* occ = reinterpret_cast<const uint32_t*>(blk);
+    uint32_t* bmp_out = reinterpret_cast<uint32_t*>(out);
+    int32_t*  val_out = reinterpret_cast<int32_t*>(out + WBMP_BITMAP_BYTES);
+
+    // Occupancy bit for this line and its nonempty rank (exclusive scan).
+    const int occb = (occ[tid >> 5] >> (tid & 31)) & 1;
+    int tot_ne;
+    const int occ_rank = block_exscan(occb, tot_ne, warp_part);
+    __syncthreads();                                   // protect warp_part reuse
+
+    const long masks_base = WBMP_OCC_BYTES;
+    const long wtab_base  = masks_base + 4L * tot_ne;
+    const long vals_base  = wtab_base + (2L * tot_ne + 7) / 8;
+    const uint32_t* masks = reinterpret_cast<const uint32_t*>(blk + masks_base);
+    const uint32_t* wtab  = reinterpret_cast<const uint32_t*>(blk + wtab_base);
+
+    const uint32_t maskL = occb ? masks[occ_rank] : 0u;
+    bmp_out[tid] = maskL;                              // bitmap in L order
+    const int nz = __popc(maskL);
+    const int W  = occb ? (int)((wtab[occ_rank >> 4] >> ((occ_rank & 15) * 2)) & 3u) + 1 : 1;
+
+    // Scratch int32 offset (scan nnz) and coded value byte offset (scan nnz*W).
+    int in_off, val_off, tot_nz, tot_val;
+    block_exscan2(nz, nz * W, in_off, val_off, tot_nz, tot_val, warp_part);
+    (void)tot_nz; (void)tot_val;
+
+    if (occb) {
+        const unsigned char* vp = blk + vals_base + val_off;
+        const int sh = 32 - 8 * W;
+        for (int k = 0; k < nz; ++k) {
+            unsigned uv = 0;
+            #pragma unroll
+            for (int b = 0; b < 4; ++b)
+                if (b < W) uv |= (unsigned)vp[(long)k * W + b] << (8 * b);
+            val_out[in_off + k] = (int)(uv << sh) >> sh;   // sign-extend from W bytes
+        }
+    }
+}
+
+// API decode kernel: locates each block in the compacted stream via the header
+// offset table, reconstructs the kernel-1 scratch layout, and (block 0)
+// publishes inv_scale = 1/mulfac for stage B.  Header is the RLE-style layout
+// [int nb][int nmf][size_t offsets[nb]][float mulfac[nmf]].
+__launch_bounds__(wbmp_opt::WBMP_OPT_THREADS)
+__global__ void waveletBitmapTwoLevelDecodeHdrKernel(
+    const unsigned char* __restrict__ input,
+    unsigned char* __restrict__ scratch1_out,
+    float* __restrict__ inv_scale_out)
+{
+    const int bid = blockIdx.x, tid = threadIdx.x;
+    const int* hdr = reinterpret_cast<const int*>(input);
+    const int num_blocks  = hdr[0];
+    const int num_mulfacs = hdr[1];
+    const size_t* offsets = reinterpret_cast<const size_t*>(input + 8);
+    const float*  mulfacs = reinterpret_cast<const float*>(input + 8 + 8L * num_blocks);
+    const unsigned char* data_base = input + 8 + 8L * num_blocks + 4L * num_mulfacs;
+
+    if (bid == 0 && tid == 0 && inv_scale_out)
+        *inv_scale_out = 1.0f / mulfacs[0];
+
+    wtl_decode_block_to_scratch(
+        data_base + offsets[bid],
+        scratch1_out + (long)bid * WBMP_SLOT_BYTES);
 }
 
 // Launch helper mirroring hipWaveletRLEFused.  output must have

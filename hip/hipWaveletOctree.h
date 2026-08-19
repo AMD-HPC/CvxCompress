@@ -41,12 +41,12 @@ static constexpr long WOCT_SLOT_RAW =
       + WBMP_WTAB_BYTES + WBMP_MAX_VAL_BYTES;
 static constexpr long WOCT_SLOT_BYTES = (WOCT_SLOT_RAW + 15) & ~15L;
 
-// Fused kernel-2 coded slot: [4B mode][significance][<=3B pad to 4-align the
-// width table][2b/nonempty-line width table][per-line packed values].
-//   sig    = octree stream (<=WOCT_MAX_SIG_BYTES) or flat masks (4096 B)
-//   values = same per-line variable-width payload as the two-level coder
+// Fused kernel-2 coded slot: [4B mode][significance][<=3B pad to 4-align][per-block
+// PFOR value payload].  PFOR region = [Wbyte+3 pad][exception mask: <=(32768/32)*4
+// =4096 B][base + patch: <= nnz*W_hi <= WBMP_MAX_VAL_BYTES].
+//   sig = octree stream (<=WOCT_MAX_SIG_BYTES) or flat masks (4096 B)
 static constexpr long WOCT_CODE_SLOT_RAW =
-    WOCT_HDR_BYTES + WOCT_MAX_SIG_BYTES + 3 + WBMP_WTAB_BYTES + WBMP_MAX_VAL_BYTES;
+    WOCT_HDR_BYTES + WOCT_MAX_SIG_BYTES + 3 + 4 + ((32768 + 31) / 32) * 4 + WBMP_MAX_VAL_BYTES;
 static constexpr long WOCT_CODE_SLOT_BYTES = (WOCT_CODE_SLOT_RAW + 15) & ~15L;
 
 // Kernel-1 bitmap word order L=x_off*256+tid maps to spatial line (ix,iy):
@@ -716,36 +716,78 @@ __global__ void waveletOctreeCodeParKernel(
     }
     __syncthreads();
 
-    long wtab_base = ((long)WOCT_HDR_BYTES + sig_bytes + 3) & ~3L;
+    // ---- per-block PFOR value coder ----
+    // Layout from val_base: [Wbyte=(Whi<<4)|Wlo, +3 pad][mask u32 words (only if
+    // Wlo<Whi)][base: Wlo low bytes per nonzero][patch: (Whi-Wlo) high bytes per
+    // exception].  All streams fixed-width/byte-aligned -> coalesced GPU decode.
+    long val_base = ((long)WOCT_HDR_BYTES + sig_bytes + 3) & ~3L;
+    int nz = __popc(m);
+    int in_off, occ_rank_u, tot_nz, tot_ne_u;
+    block_exscan2(nz, m ? 1 : 0, in_off, occ_rank_u, tot_nz, tot_ne_u, warp_part);
+    (void)occ_rank_u; (void)tot_ne_u;
 
-    // ---- per-line width table + packed values (two-level layout) ----
-    int nz = __popc(m), occb = m ? 1 : 0;
-    int in_off, occ_rank, tot_nz, tot_ne;
-    block_exscan2(nz, occb, in_off, occ_rank, tot_nz, tot_ne, warp_part);
-    (void)tot_nz;
-    int mx = 0;
-    for (int k=0;k<nz;++k){ int a=val[in_off+k]; a=a<0?-a:a; mx|=a; }
-    int W = nz ? wbmp_width_bytes(mx) : 1;
-    int val_off, tot_val;
-    val_off = block_exscan(nz * W, tot_val, warp_part);
-
-    long vals_base = wtab_base + (2L * tot_ne + 7) / 8;
-    uint32_t* wtab = reinterpret_cast<uint32_t*>(blk_out + wtab_base);
-    int wtab_words = (2 * tot_ne + 31) / 32;
-    for (int i=tid;i<wtab_words;i+=1024) wtab[i]=0;
+    // per-line width histogram (local counts, then block reduce)
+    int lc1=0,lc2=0,lc3=0,lc4=0;
+    for (int k=0;k<nz;++k){ int a=val[in_off+k]; a=a<0?-a:a; int w=wbmp_width_bytes(a);
+        if(w<=1)++lc1; else if(w==2)++lc2; else if(w==3)++lc3; else ++lc4; }
+    __shared__ int sh_h[5];
+    __shared__ int sh_wlo;
+    if (tid<5) sh_h[tid]=0;
     __syncthreads();
+    if(lc2)atomicAdd(&sh_h[2],lc2);
+    if(lc3)atomicAdd(&sh_h[3],lc3);
+    if(lc4)atomicAdd(&sh_h[4],lc4);
+    __syncthreads();
+    int Whi = sh_h[4]?4 : sh_h[3]?3 : sh_h[2]?2 : 1;
+    int nnz = tot_nz;
+    if (tid==0){
+        long best=-1; int Wlo=Whi; long maskbytes=(long)((nnz+31)/32)*4;
+        for (int wl=1; wl<=Whi; ++wl){
+            long nexc=0; for (int w=wl+1;w<=4;++w) nexc+=sh_h[w];
+            long cost=(long)nnz*wl + nexc*(Whi-wl) + (wl<Whi?maskbytes:0);
+            if (best<0||cost<best){ best=cost; Wlo=wl; }
+        }
+        sh_wlo = Wlo;
+    }
+    __syncthreads();
+    int Wlo = sh_wlo;
+    int have_mask = (Wlo < Whi);
+    long mask_base  = val_base + 4;                  // Wbyte(1)+pad(3): keep mask 4-aligned
+    int  mask_words = have_mask ? (nnz + 31) / 32 : 0;
+    long base_base  = mask_base + (long)mask_words * 4;
+    long patch_base = base_base + (long)nnz * Wlo;
 
-    if (occb) {
-        atomicOr(&wtab[occ_rank >> 4], (uint32_t)(W - 1) << ((occ_rank & 15) * 2));
-        long p = vals_base + val_off;
+    int e_line = 0;                                  // local exceptions (width > Wlo)
+    if (2 > Wlo) e_line += lc2;
+    if (3 > Wlo) e_line += lc3;
+    if (4 > Wlo) e_line += lc4;
+    __syncthreads();                                 // protect warp_part reuse
+    int ex_base, tot_ex;
+    ex_base = block_exscan(e_line, tot_ex, warp_part);
+
+    uint32_t* mp = reinterpret_cast<uint32_t*>(blk_out + mask_base);
+    for (int i=tid;i<mask_words;i+=1024) mp[i]=0;
+    __syncthreads();
+    if (tid==0) blk_out[val_base] = (unsigned char)((Whi << 4) | Wlo);
+
+    if (nz) {
+        int local_ex = 0;
         for (int k=0;k<nz;++k){
-            unsigned uv = (unsigned)val[in_off + k];
-            long q = p + (long)k * W;
+            int v = val[in_off+k]; unsigned uv = (unsigned)v;
+            long g = (long)in_off + k;
+            long q = base_base + g * Wlo;
             #pragma unroll
-            for (int b=0;b<4;++b) if (b<W) blk_out[q + b] = (unsigned char)(uv >> (8*b));
+            for (int b=0;b<4;++b) if (b<Wlo) blk_out[q + b] = (unsigned char)(uv >> (8*b));
+            int a = v<0?-v:v;
+            if (wbmp_width_bytes(a) > Wlo){
+                atomicOr(&mp[g>>5], 1u << (g & 31));
+                long pq = patch_base + (long)(ex_base + local_ex) * (Whi - Wlo);
+                for (int b=0;b<Whi-Wlo;++b) blk_out[pq + b] = (unsigned char)(uv >> (8*(Wlo+b)));
+                ++local_ex;
+            }
         }
     }
-    if (tid==0) block_sizes2[bid] = (size_t)(vals_base + tot_val);
+    if (tid==0) block_sizes2[bid] = (size_t)(patch_base + (long)tot_ex * (Whi - Wlo));
 }
 
 inline hipError_t hipWaveletOctreeCode(
@@ -902,26 +944,46 @@ __device__ __forceinline__ void woct_decode_block_to_scratch(
     uint32_t maskL = s.masks_sp[woct_L_to_spatial(tid)];
     bmp_out[tid] = maskL;                        // bitmap in L order
 
-    // ---- value unpack (reverse of the fused encoder) ----
-    long wtab_base = ((long)WOCT_HDR_BYTES + sig_bytes + 3) & ~3L;
-    int nz = __popc(maskL), occb = maskL ? 1 : 0;
-    int in_off, occ_rank, tot_nz, tot_ne;
-    block_exscan2(nz, occb, in_off, occ_rank, tot_nz, tot_ne, warp_part);
+    // ---- per-block PFOR value unpack (reverse of the fused encoder) ----
+    long val_base = ((long)WOCT_HDR_BYTES + sig_bytes + 3) & ~3L;
+    int nz = __popc(maskL);
+    int in_off, occ_rank_u, tot_nz, tot_ne_u;
+    block_exscan2(nz, maskL ? 1 : 0, in_off, occ_rank_u, tot_nz, tot_ne_u, warp_part);
+    (void)occ_rank_u; (void)tot_ne_u;
     __syncthreads();                            // protect warp_part reuse
-    const uint32_t* wtab = reinterpret_cast<const uint32_t*>(blk + wtab_base);
-    int W = occb ? (int)((wtab[occ_rank >> 4] >> ((occ_rank & 15) * 2)) & 3u) + 1 : 1;
-    int val_off, tot_val;
-    val_off = block_exscan(nz * W, tot_val, warp_part);
-    (void)tot_val;
-    long vals_base = wtab_base + (2L * tot_ne + 7) / 8;
-    if (occb) {
-        const unsigned char* vp = blk + vals_base + val_off;
-        int sh = 32 - 8*W;
-        for (int k=0;k<nz;++k){
-            unsigned uv = 0;
-            #pragma unroll
-            for (int b=0;b<4;++b) if (b<W) uv |= (unsigned)vp[(long)k*W + b] << (8*b);
-            val_out[in_off + k] = (int)(uv << sh) >> sh;   // sign-extend from W bytes
+    int nnz = tot_nz;
+    if (nnz > 0) {
+        int Wlo = blk[val_base] & 0xF, Whi = (blk[val_base] >> 4) & 0xF;
+        int have_mask = (Wlo < Whi);
+        long mask_base  = val_base + 4;
+        int  mask_words = have_mask ? (nnz + 31) / 32 : 0;
+        long base_base  = mask_base + (long)mask_words * 4;
+        long patch_base = base_base + (long)nnz * Wlo;
+        const uint32_t* mp = reinterpret_cast<const uint32_t*>(blk + mask_base);
+
+        int e_line = 0;                         // local exceptions in this line's rank range
+        if (have_mask) for (int k=0;k<nz;++k){ long g=(long)in_off+k; if((mp[g>>5]>>(g&31))&1u) ++e_line; }
+        int ex_base, tot_ex;
+        ex_base = block_exscan(e_line, tot_ex, warp_part);
+        (void)tot_ex;
+
+        int shlo = 32 - 8*Wlo, shhi = 32 - 8*Whi;
+        if (nz) {
+            int local_ex = 0;
+            for (int k=0;k<nz;++k){
+                long g = (long)in_off + k; unsigned uv = 0;
+                #pragma unroll
+                for (int b=0;b<4;++b) if (b<Wlo) uv |= (unsigned)blk[base_base + g*Wlo + b] << (8*b);
+                int exc = have_mask && ((mp[g>>5]>>(g&31))&1u);
+                if (exc){
+                    long pq = patch_base + (long)(ex_base + local_ex) * (Whi - Wlo);
+                    for (int b=0;b<Whi-Wlo;++b) uv |= (unsigned)blk[pq + b] << (8*(Wlo+b));
+                    val_out[in_off + k] = (int)(uv << shhi) >> shhi;
+                    ++local_ex;
+                } else {
+                    val_out[in_off + k] = (int)(uv << shlo) >> shlo;
+                }
+            }
         }
     }
     if (tid==0 && bsz_this) *bsz_this = (size_t)WBMP_BITMAP_BYTES + (size_t)tot_nz * 4;
