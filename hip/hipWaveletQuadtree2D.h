@@ -26,6 +26,7 @@
 
 #include <hip/hip_runtime.h>
 #include "ds79.h"
+#include "hipPlaneIO.h"
 
 // Tile batching (identical to hipWaveletRLE2D.h so the transform is unchanged).
 static constexpr int WQT2D_TILES_PER_WG = 32;
@@ -290,12 +291,10 @@ __global__ void waveletQuadtree2DForwardKernel(
             int gy = blockIdx.y * 32 + yr;
             int x0 = xg * 4;
             if (tile_bx < nbx) {
-                uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
-                auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                    const_cast<float*>(input), 0, -1, 0x00027000);
-                auto v = __builtin_bit_cast(
-                    __attribute__((__vector_size__(4 * sizeof(float)))) float,
-                    __builtin_amdgcn_raw_buffer_load_b128(rsrc, byte_off, 0, SLC));
+                size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
+                auto v = hipPlaneLoadNT<
+                    __attribute__((__vector_size__(4 * sizeof(float)))) float>(
+                    input, byte_off);
                 wavelet[b * 1024 + (x0+0) * 32 + (yr ^ (x0+0))] = v[0];
                 wavelet[b * 1024 + (x0+1) * 32 + (yr ^ (x0+1))] = v[1];
                 wavelet[b * 1024 + (x0+2) * 32 + (yr ^ (x0+2))] = v[2];
@@ -592,12 +591,8 @@ __global__ void waveletQuadtree2DInverseKernel(
                     if (tb >= nbx) continue;
                     int gx = tb * 32 + xg * 4;
                     int gy = blockIdx.y * 32 + yr;
-                    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
-                    auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                        output, 0, -1, 0x00027000);
-                    auto vi = __builtin_bit_cast(
-                        __attribute__((__vector_size__(4 * sizeof(int)))) int, store_regs[s]);
-                    __builtin_amdgcn_raw_buffer_store_b128(vi, rsrc, byte_off, 0, SLC);
+                    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
+                    hipPlaneStoreNT(output, byte_off, store_regs[s]);
                 }
             }
             __syncthreads();

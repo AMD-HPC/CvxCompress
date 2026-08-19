@@ -1126,13 +1126,10 @@ __device__ __forceinline__ void woct_bitmap_inverse_body(
     float* block_base = output + (size_t)blockIdx.z*32*ldimxy;
     int gx = blockIdx.x*32 + xg*4;
     int gy = blockIdx.y*32 + yr;
-    uint32_t byte_off = (gx + gy*ldimx)*(uint32_t)sizeof(float);
+    size_t byte_off = ((size_t)gy*ldimx + gx)*sizeof(float);
     #pragma unroll
-    for (int p=0;p<PLANES;p++){
-        auto rsrc = __builtin_amdgcn_make_buffer_rsrc(block_base + (long)p*ldimxy, 0, -1, 0x00027000);
-        auto v = __builtin_bit_cast(__attribute__((__vector_size__(16))) int, regs[p]);
-        __builtin_amdgcn_raw_buffer_store_b128(v, rsrc, byte_off, 0, SLC);
-    }
+    for (int p=0;p<PLANES;p++)
+        hipPlaneStoreNT<ds79_float4_vec>(block_base + (size_t)p*ldimxy, byte_off, regs[p]);
 }
 
 // Stage B with a host-scalar inv_scale (prototype / test path).

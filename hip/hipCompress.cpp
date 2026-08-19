@@ -53,7 +53,7 @@ const char* hipCompressErrorString(hipCompressError_t err)
     case HIP_COMPRESS_ERROR_MEMORY_ALLOCATION: return "memory allocation failed";
     case HIP_COMPRESS_ERROR_INVALID_SCALE:    return "scale must be > 0 and finite";
     case HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH:     return "extraction wavelet dims must equal plan dims";
-    case HIP_COMPRESS_ERROR_PLANE_TOO_LARGE:  return "single plane exceeds 4 GB (nx * ny * 4 > 2^32)";
+    case HIP_COMPRESS_ERROR_PLANE_TOO_LARGE:  return "single plane too large (nx * ny must be < 2^31 elements)";
     case HIP_COMPRESS_ERROR_HIP_RUNTIME:      return "internal HIP runtime error";
     default:                                  return "unknown error";
     }
@@ -82,7 +82,10 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
             PLAN_ERROR(p, HIP_COMPRESS_ERROR_NOT_MULTIPLE_OF_32, hipErrorInvalidValue);
     }
 
-    if ((long)nx * (long)ny * (long)sizeof(float) > (1L << 32))
+    // Intra-plane addressing uses 64-bit byte offsets, so a plane is no longer
+    // capped at 4 GB.  The remaining bound is the int plane stride (nx*ny) used
+    // by the kernels: the element count must stay below 2^31 (~8 GB per plane).
+    if ((long)nx * (long)ny > (long)INT_MAX)
         PLAN_ERROR(p, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
 
     // Resolve the dimensionality-selected default to a concrete codec: quadtree
@@ -417,9 +420,6 @@ hipError_t hipCopyToWaveletLayout(
         if (ex < 32 || ey < 32 || ez < 32)
             PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
     }
-    if ((long)ldimxy * (long)sizeof(float) > (1L << 32))
-        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
-
     int wnx = hipCompressWaveletDim(ex);
     int wny = hipCompressWaveletDim(ey);
     int wnz = plan->is_2d ? 1 : hipCompressWaveletDim(ez);
@@ -508,9 +508,6 @@ hipError_t hipCopyFromWaveletLayout(
         if (ex < 32 || ey < 32 || ez < 32)
             PLAN_ERROR(plan, HIP_COMPRESS_ERROR_WINDOW_TOO_SMALL, hipErrorInvalidValue);
     }
-    if ((long)ldimxy * (long)sizeof(float) > (1L << 32))
-        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
-
     int wnx = hipCompressWaveletDim(ex);
     int wny = hipCompressWaveletDim(ey);
     int wnz = plan->is_2d ? 1 : hipCompressWaveletDim(ez);

@@ -2461,7 +2461,10 @@ static bool test_error_codes()
     }
     {
         hipCompressPlan* plan = nullptr;
-        hipError_t err = hipCompressCreatePlan(&plan, 32800, 32768, 32, 0);
+        // 64-bit intra-plane offsets lifted the old 4 GB cap; the remaining
+        // bound is the int plane stride nx*ny (< 2^31 elements).  65536*32768
+        // = 2^31 > INT_MAX, so the guard still rejects (before any hipMalloc).
+        hipError_t err = hipCompressCreatePlan(&plan, 65536, 32768, 32, 0);
         if (!check_error("CreatePlan plane too large", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
             pass = false;
@@ -2706,24 +2709,10 @@ static bool test_error_codes()
     }
 
     // --- Plane too large ---
-    {
-        hipError_t err = hipCopyToWaveletLayout(
-            d_buf, 32768, 1073741825,
-            0, 0, 0,
-            128, 128, 128,
-            d_buf, nullptr, plan, 0);
-        if (!check_error("CopyTo plane too large", plan, err,
-                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
-            pass = false;
-    }
-    {
-        hipError_t err = hipCopyFromWaveletLayout(
-            d_buf, d_buf, 32768, 1073741825,
-            0, 0, 0, 128, 128, 128, plan, 0);
-        if (!check_error("CopyFrom plane too large", plan, err,
-                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
-            pass = false;
-    }
+    // The former CopyTo/CopyFrom "plane too large" (4 GB) rejections were
+    // removed: intra-plane addressing is now 64-bit, so source strides are
+    // bounded only by the int stride type (up to INT_MAX elements) and are no
+    // longer size-capped here.
 
     // --- Decompress errors ---
     {

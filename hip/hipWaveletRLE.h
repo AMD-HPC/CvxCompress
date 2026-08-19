@@ -12,12 +12,13 @@
 //
 // Eliminates the intermediate global write+read between wavelet and RLE.
 // 32 KB LDS reused across phases: wavelet Y/X, then RLE scan+compact.
-// Zero scratch. Buffer instructions for loads. Occupancy 2 on gfx942.
+// Zero scratch. Global (size_t offset) plane loads. Occupancy 2 on gfx942.
 
 #include <hip/hip_runtime.h>
 #include <rocprim/block/block_scan.hpp>
 #include <rocprim/device/device_scan.hpp>
 #include "ds79.h"
+#include "hipPlaneIO.h"
 #include "Run_Length_Escape_Codes.hxx"
 
 using wrle_float4_vec = ds79_float4_vec;
@@ -161,19 +162,14 @@ __global__ void waveletRLEFusedKernel(
 
     int gx = blockIdx.x * 32 + xg * 4;
     int gy = blockIdx.y * 32 + yr;
-    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
+    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
 
     // ---- Phase 1: Load 32 planes from global ----
     wrle_float4_vec regs[PLANES];
     #pragma unroll
-    for (int p = 0; p < PLANES; p++) {
-        auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-            const_cast<float*>(block_base + (long)p * ldimxy),
-            0, -1, 0x00027000);
-        regs[p] = __builtin_bit_cast(wrle_float4_vec,
-            __builtin_amdgcn_raw_buffer_load_b128(
-                rsrc, byte_off, 0, SLC));
-    }
+    for (int p = 0; p < PLANES; p++)
+        regs[p] = hipPlaneLoadNT<wrle_float4_vec>(
+            block_base + (size_t)p * ldimxy, byte_off);
 
     // ---- Phase 2: Z-transform in registers ----
     ds79_forward_f4_scalar_tmp(regs, PLANES);
@@ -309,173 +305,6 @@ inline hipError_t hipWaveletRLEFusedDumpCoef(
     waveletRLEFusedKernel<<<grid, dim3(256)>>>(
         input, output, block_sizes, scale, ldimx, ldimxy,
         nullptr, nullptr, d_coef_out);
-    return hipGetLastError();
-}
-
-// ---------------------------------------------------------------------------
-// saddr variant: uses global_load_dwordx4 with SGPR base + VGPR offset
-// instead of buffer instructions.  Everything else is identical.
-// ---------------------------------------------------------------------------
-
-__device__ __forceinline__
-wrle_float4_vec wrle_saddr_load_nt(const float* base, uint32_t byte_off) {
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(base);
-    return __builtin_nontemporal_load(
-        reinterpret_cast<const wrle_float4_vec*>(p + byte_off));
-}
-
-__launch_bounds__(256, 2)
-__global__ void waveletRLEFusedSaddrKernel(
-    const float* __restrict__ input,
-    unsigned char* __restrict__ output,
-    size_t* __restrict__ block_sizes,
-    float scale,
-    int ldimx, int ldimxy,
-    const double* __restrict__ d_rms,
-    float* __restrict__ d_mulfac_out,
-    float* __restrict__ d_coef_out = nullptr)   // kept for signature parity with
-                                                // waveletRLEFusedKernel (unused)
-{
-    constexpr int PLANES = 32;
-    constexpr int BATCH  = 8;
-    constexpr int NTHREADS = 256;
-    using BlockScan = rocprim::block_scan<int, NTHREADS>;
-    (void)d_coef_out;
-
-    __shared__ union {
-        float wavelet[BATCH * 1024];
-        typename BlockScan::storage_type scan;
-        unsigned char compact[WRLE_LDS_BYTES];
-    } lds;
-
-    int tid = threadIdx.x;
-    int xg  = tid % 8;
-    int yr  = tid / 8;
-
-    float mulfac;
-    if (d_rms != nullptr) {
-        float rms = (float)*d_rms;
-        float product = rms * scale;
-        mulfac = (product > 0.0f && __builtin_isfinite(1.0f / product))
-                 ? (1.0f / product) : 1.0f;
-        if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-            if (d_mulfac_out) *d_mulfac_out = mulfac;
-        }
-    } else {
-        mulfac = scale;
-    }
-
-    const float* block_base = input + (size_t)blockIdx.z * 32 * ldimxy;
-    int gx = blockIdx.x * 32 + xg * 4;
-    int gy = blockIdx.y * 32 + yr;
-    uint32_t xy_byte     = (uint32_t)(gx + gy * ldimx) * (uint32_t)sizeof(float);
-    uint32_t byte_stride = (uint32_t)ldimxy * (uint32_t)sizeof(float);
-
-    // ---- Phase 1: Load 32 planes from global (saddr) ----
-    wrle_float4_vec regs[PLANES];
-    #pragma unroll
-    for (int p = 0; p < PLANES; p++)
-        regs[p] = wrle_saddr_load_nt(block_base, xy_byte + (uint32_t)p * byte_stride);
-
-    // ---- Phase 2: Z-transform in registers ----
-    ds79_forward_f4_scalar_tmp(regs, PLANES);
-
-    // ---- Phase 3: Y+X transform in LDS (batches of 8) ----
-    for (int pb = 0; pb < PLANES; pb += BATCH) {
-        for (int dp = 0; dp < BATCH; dp++) {
-            wrle_float4_vec v = regs[pb + dp];
-            int x0 = xg * 4;
-            lds.wavelet[dp * 1024 + (x0+0) * 32 + (yr ^ (x0+0))] = v[0];
-            lds.wavelet[dp * 1024 + (x0+1) * 32 + (yr ^ (x0+1))] = v[1];
-            lds.wavelet[dp * 1024 + (x0+2) * 32 + (yr ^ (x0+2))] = v[2];
-            lds.wavelet[dp * 1024 + (x0+3) * 32 + (yr ^ (x0+3))] = v[3];
-        }
-        __syncthreads();
-
-        int pl  = tid / 32;
-        int pos = tid % 32;
-
-        float line[32];
-        for (int y = 0; y < 32; y++)
-            line[y] = lds.wavelet[pl * 1024 + pos * 32 + (y ^ pos)];
-        ds79_forward_reg32(line);
-        for (int y = 0; y < 32; y++)
-            lds.wavelet[pl * 1024 + pos * 32 + (y ^ pos)] = line[y];
-        __syncthreads();
-
-        for (int x = 0; x < 32; x++)
-            line[x] = lds.wavelet[pl * 1024 + x * 32 + (pos ^ x)];
-        ds79_forward_reg32(line);
-        for (int x = 0; x < 32; x++)
-            lds.wavelet[pl * 1024 + x * 32 + (pos ^ x)] = line[x];
-        __syncthreads();
-
-        for (int dp = 0; dp < BATCH; dp++) {
-            wrle_float4_vec v;
-            int x0 = xg * 4;
-            v[0] = lds.wavelet[dp * 1024 + (x0+0) * 32 + (yr ^ (x0+0))];
-            v[1] = lds.wavelet[dp * 1024 + (x0+1) * 32 + (yr ^ (x0+1))];
-            v[2] = lds.wavelet[dp * 1024 + (x0+2) * 32 + (yr ^ (x0+2))];
-            v[3] = lds.wavelet[dp * 1024 + (x0+3) * 32 + (yr ^ (x0+3))];
-            regs[pb + dp] = v;
-        }
-        __syncthreads();
-    }
-
-    // ---- Phase 4: Quantize + RLE encode (two-pass, compacted) ----
-    // Block layout: [1024B zline_meta] [RLE data]
-    int bid = blockIdx.x + blockIdx.y * gridDim.x + blockIdx.z * gridDim.x * gridDim.y;
-    unsigned char* block_out = output + (long)bid * 4 * WRLE_LDS_BYTES;
-    unsigned char* meta_out = block_out;
-    unsigned char* rle_out  = block_out + WRLE_META_PER_BLOCK;
-    int block_total = 0;
-
-    for (int x_off = 0; x_off < 4; ++x_off) {
-        int my_count = wrle_zline<false>(regs, x_off, mulfac, nullptr);
-
-        meta_out[x_off * 256 + tid] = (unsigned char)my_count;
-
-        int my_offset, pass_total;
-        BlockScan().exclusive_scan(my_count, my_offset, 0, pass_total, lds.scan);
-        __syncthreads();
-
-        wrle_zline<true>(regs, x_off, mulfac, lds.compact + my_offset);
-        __syncthreads();
-
-        int aligned_total = (pass_total + 3) & ~3;
-        for (int off = tid * 4; off < aligned_total; off += NTHREADS * 4) {
-            unsigned val = 0;
-            if (off < pass_total) {
-                val  = (unsigned)lds.compact[off];
-                if (off+1 < pass_total) val |= (unsigned)lds.compact[off+1] << 8;
-                if (off+2 < pass_total) val |= (unsigned)lds.compact[off+2] << 16;
-                if (off+3 < pass_total) val |= (unsigned)lds.compact[off+3] << 24;
-            }
-            if (off < aligned_total) {
-                unsigned* dst32 = (unsigned*)(rle_out + block_total + off);
-                *dst32 = val;
-            }
-        }
-        __syncthreads();
-        block_total += pass_total;
-    }
-
-    if (tid == 0)
-        block_sizes[bid] = WRLE_META_PER_BLOCK + block_total;
-}
-
-inline hipError_t hipWaveletRLEFusedSaddr(
-    const float* input,
-    unsigned char* output,
-    size_t* block_sizes,
-    float scale,
-    int nx, int ny, int nz,
-    int ldimx, int ldimxy)
-{
-    dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    waveletRLEFusedSaddrKernel<<<grid, dim3(256)>>>(
-        input, output, block_sizes, scale, ldimx, ldimxy,
-        nullptr, nullptr);
     return hipGetLastError();
 }
 
@@ -628,19 +457,14 @@ __global__ void waveletSegRLEFusedKernel(
 
     int gx = blockIdx.x * 32 + xg * 4;
     int gy = blockIdx.y * 32 + yr;
-    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
+    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
 
     // ---- Phase 1: Load 32 planes from global ----
     wrle_float4_vec regs[PLANES];
     #pragma unroll
-    for (int p = 0; p < PLANES; p++) {
-        auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-            const_cast<float*>(block_base + (long)p * ldimxy),
-            0, -1, 0x00027000);
-        regs[p] = __builtin_bit_cast(wrle_float4_vec,
-            __builtin_amdgcn_raw_buffer_load_b128(
-                rsrc, byte_off, 0, SLC));
-    }
+    for (int p = 0; p < PLANES; p++)
+        regs[p] = hipPlaneLoadNT<wrle_float4_vec>(
+            block_base + (size_t)p * ldimxy, byte_off);
 
     // ---- Phase 2: Z-transform in registers ----
     ds79_forward_f4_scalar_tmp(regs, PLANES);

@@ -7,6 +7,7 @@
 
 #include <hip/hip_runtime.h>
 #include <rocprim/block/block_reduce.hpp>
+#include "hipPlaneIO.h"
 
 using bcopy_float4_vec = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using bcopy_int4_vec   = __attribute__((__vector_size__(4 * sizeof(int)))) int;
@@ -47,23 +48,32 @@ __global__ void copyToWaveletKernelOpt(
 
     bool y_in_range = (gy < ey);
 
-    uint32_t src_row_byte = ((y0 + gy) * ldimx + x0 + gx) * (uint32_t)sizeof(float);
+    size_t src_row_byte = ((size_t)(y0 + gy) * ldimx + x0 + gx) * sizeof(float);
+    bool src_x_all_in = (gx + 3 < ex);
 
     // ---- Phase 1: Load ZPB planes (or zero-fill beyond extraction) ----
+    // Global loads have no OOB clamp (unlike the former buffer path), so the
+    // ragged x edge is read lane-by-lane, guarded by the extraction window.
     bcopy_float4_vec regs[BCOPY_ZPB];
     constexpr bcopy_float4_vec zero_vec = {0.0f, 0.0f, 0.0f, 0.0f};
     #pragma unroll
     for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
         int iz = z_start + dz;
-        if (y_in_range && iz < ez) {
-            auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                const_cast<float*>(d_src + (long)(z0 + iz) * ldimxy),
-                0, -1, 0x00027000);
-            regs[dz] = __builtin_bit_cast(bcopy_float4_vec,
-                __builtin_amdgcn_raw_buffer_load_b128(
-                    plane_rsrc, src_row_byte, 0, SLC));
-        } else {
+        if (!(y_in_range && iz < ez) || gx >= ex) {
             regs[dz] = zero_vec;
+            continue;
+        }
+        const float* plane = d_src + (size_t)(z0 + iz) * ldimxy;
+        if (src_x_all_in) {
+            regs[dz] = __builtin_bit_cast(bcopy_float4_vec,
+                hipPlaneLoadF4u(plane, src_row_byte));
+        } else {
+            bcopy_float4_vec v = zero_vec;
+            if (gx + 0 < ex) v[0] = hipPlaneLoadScalarNT(plane, src_row_byte + 0);
+            if (gx + 1 < ex) v[1] = hipPlaneLoadScalarNT(plane, src_row_byte + 4);
+            if (gx + 2 < ex) v[2] = hipPlaneLoadScalarNT(plane, src_row_byte + 8);
+            if (gx + 3 < ex) v[3] = hipPlaneLoadScalarNT(plane, src_row_byte + 12);
+            regs[dz] = v;
         }
     }
 
@@ -84,18 +94,14 @@ __global__ void copyToWaveletKernelOpt(
 
     // ---- Phase 3: Store ZPB planes (skip planes beyond wnz) ----
     if constexpr (DO_COPY) {
-        uint32_t dst_byte = (gx + gy * wnx) * (uint32_t)sizeof(float);
+        // Wavelet dst is 32-padded (wnx,wny multiples of 32) → always full tiles.
+        size_t dst_byte = ((size_t)gy * wnx + gx) * sizeof(float);
 
         #pragma unroll
         for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
-            if (z_start + dz < wnz) {
-                auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                    d_dst + (long)(z_start + dz) * wnx * wny,
-                    0, -1, 0x00027000);
-                auto vi = __builtin_bit_cast(bcopy_int4_vec, regs[dz]);
-                __builtin_amdgcn_raw_buffer_store_b128(
-                    vi, plane_rsrc, dst_byte, 0, SLC);
-            }
+            if (z_start + dz < wnz)
+                hipPlaneStoreNT<bcopy_float4_vec>(
+                    d_dst + (size_t)(z_start + dz) * wnx * wny, dst_byte, regs[dz]);
         }
     }
 
@@ -173,59 +179,46 @@ __global__ void copyFromWaveletKernelOpt(
     if (gy >= ey) return;
     if (gx >= ex) return;
 
-    uint32_t src_byte = (gx + gy * wnx) * (uint32_t)sizeof(float);
-    long wav_plane = (long)wnx * wny;
+    // Wavelet src is 32-padded and the float4 never crosses a 32-tile boundary
+    // (xg*4+3 <= 31 < wnx), so the vector load is always fully in bounds.
+    size_t src_byte = ((size_t)gy * wnx + gx) * sizeof(float);
+    size_t wav_plane = (size_t)wnx * wny;
 
     constexpr bcopy_float4_vec zero_vec_from = {0.0f, 0.0f, 0.0f, 0.0f};
     bcopy_float4_vec regs[BCOPY_ZPB];
     #pragma unroll
     for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
-        if (z_start + dz < wnz) {
-            auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                const_cast<float*>(d_src + (long)(z_start + dz) * wav_plane),
-                0, -1, 0x00027000);
-            regs[dz] = __builtin_bit_cast(bcopy_float4_vec,
-                __builtin_amdgcn_raw_buffer_load_b128(
-                    plane_rsrc, src_byte, 0, SLC));
-        } else {
+        if (z_start + dz < wnz)
+            regs[dz] = hipPlaneLoadNT<bcopy_float4_vec>(
+                d_src + (size_t)(z_start + dz) * wav_plane, src_byte);
+        else
             regs[dz] = zero_vec_from;
-        }
     }
 
-    uint32_t dst_byte = ((y0 + gy) * ldimx + x0 + gx) * (uint32_t)sizeof(float);
+    size_t dst_byte = ((size_t)(y0 + gy) * ldimx + x0 + gx) * sizeof(float);
     bool x_all_in = (gx + 3 < ex);
 
     if (x_all_in) {
         #pragma unroll
         for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
             int iz = z_start + dz;
-            if (iz < ez) {
-                auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                    d_dst + (long)(z0 + iz) * ldimxy,
-                    0, -1, 0x00027000);
-                auto vi = __builtin_bit_cast(bcopy_int4_vec, regs[dz]);
-                __builtin_amdgcn_raw_buffer_store_b128(
-                    vi, plane_rsrc, dst_byte, 0, SLC);
-            }
+            if (iz < ez)
+                hipPlaneStoreF4u(
+                    d_dst + (size_t)(z0 + iz) * ldimxy, dst_byte,
+                    __builtin_bit_cast(hip_float4_u, regs[dz]));
         }
     } else {
+        // Ragged x edge: store lane-by-lane, guarded by the extraction window
+        // (global stores have no OOB clamp).
         #pragma unroll
         for (int dz = 0; dz < BCOPY_ZPB; ++dz) {
             int iz = z_start + dz;
             if (iz < ez) {
-                auto plane_rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                    d_dst + (long)(z0 + iz) * ldimxy,
-                    0, -1, 0x00027000);
-                float e0 = regs[dz][0], e1 = regs[dz][1];
-                float e2 = regs[dz][2], e3 = regs[dz][3];
-                if (gx + 0 < ex) __builtin_amdgcn_raw_buffer_store_b32(
-                    __builtin_bit_cast(int, e0), plane_rsrc, dst_byte + 0, 0, SLC);
-                if (gx + 1 < ex) __builtin_amdgcn_raw_buffer_store_b32(
-                    __builtin_bit_cast(int, e1), plane_rsrc, dst_byte + 4, 0, SLC);
-                if (gx + 2 < ex) __builtin_amdgcn_raw_buffer_store_b32(
-                    __builtin_bit_cast(int, e2), plane_rsrc, dst_byte + 8, 0, SLC);
-                if (gx + 3 < ex) __builtin_amdgcn_raw_buffer_store_b32(
-                    __builtin_bit_cast(int, e3), plane_rsrc, dst_byte + 12, 0, SLC);
+                float* plane = d_dst + (size_t)(z0 + iz) * ldimxy;
+                if (gx + 0 < ex) hipPlaneStoreScalarNT(plane, dst_byte + 0,  regs[dz][0]);
+                if (gx + 1 < ex) hipPlaneStoreScalarNT(plane, dst_byte + 4,  regs[dz][1]);
+                if (gx + 2 < ex) hipPlaneStoreScalarNT(plane, dst_byte + 8,  regs[dz][2]);
+                if (gx + 3 < ex) hipPlaneStoreScalarNT(plane, dst_byte + 12, regs[dz][3]);
             }
         }
     }

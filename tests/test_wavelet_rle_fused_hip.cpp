@@ -314,10 +314,10 @@ void bench(int NX, int NY, int NZ, float scale, int warmup, int runs)
     printf("  unfused          %7.3f ms  %7.1f GB/s  CR %.1f:1\n", ms_unfused, bw_u, cr_u);
 
     // Fused (no compaction)
-    FusedLauncher launchers[] = { hipWaveletRLEFused, hipWaveletRLEFusedSaddr };
-    const char* names[]       = { "fused-buf     ", "fused-saddr   " };
+    FusedLauncher launchers[] = { hipWaveletRLEFused };
+    const char* names[]       = { "fused         " };
 
-    for (int k = 0; k < 2; ++k) {
+    for (int k = 0; k < 1; ++k) {
         for (int i = 0; i < warmup; ++i)
             HIPCHECK(launchers[k](d_raw, d_out, d_sizes, scale, NX, NY, NZ, ldimx, ldimxy));
         HIPCHECK(hipDeviceSynchronize());
@@ -588,8 +588,7 @@ int main()
 
     float scales[] = {0.01f, 0.1f, 1.0f, 10.0f, 100.0f};
     struct { FusedLauncher fn; const char* tag; } variants[] = {
-        { hipWaveletRLEFused,      "buffer" },
-        { hipWaveletRLEFusedSaddr, "saddr"  },
+        { hipWaveletRLEFused, "fused" },
     };
 
     printf("-- Correctness (fused) --\n");

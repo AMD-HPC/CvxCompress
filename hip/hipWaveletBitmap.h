@@ -75,18 +75,14 @@ __global__ void waveletBitmapFusedKernel(
 
     int gx = blockIdx.x * 32 + xg * 4;
     int gy = blockIdx.y * 32 + yr;
-    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
+    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
 
     // ---- Phase 1: Load 32 planes from global ----
     wrle_float4_vec regs[PLANES];
     #pragma unroll
-    for (int p = 0; p < PLANES; p++) {
-        auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-            const_cast<float*>(block_base + (long)p * ldimxy),
-            0, -1, 0x00027000);
-        regs[p] = __builtin_bit_cast(wrle_float4_vec,
-            __builtin_amdgcn_raw_buffer_load_b128(rsrc, byte_off, 0, SLC));
-    }
+    for (int p = 0; p < PLANES; p++)
+        regs[p] = hipPlaneLoadNT<wrle_float4_vec>(
+            block_base + (size_t)p * ldimxy, byte_off);
 
     // ---- Phase 2: Z-transform in registers ----
     ds79_forward_f4_scalar_tmp(regs, PLANES);
