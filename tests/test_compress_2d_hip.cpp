@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
+// Use of this source code is governed by an MIT-style license that can be
+// found in the LICENSE file or at https://opensource.org/licenses/MIT.
+
 // 2D compression round-trip test.
 // Tests hipCompress API with nz=1 (2D mode):
 //   1. Plan lifecycle with nz=1
