@@ -31,6 +31,34 @@
     } \
 } while(0)
 
+// Opt-in diagnostics: set HIPCOMPRESS_DEBUG=1 for scheme + result lines,
+// HIPCOMPRESS_DEBUG=2 to also dump device-memory allocation detail.  The
+// environment is read once and cached, so a disabled build pays only a single
+// predictable branch per instrumented call and prints nothing.
+static int hipCompressDebugLevel()
+{
+    static int lvl = -1;
+    if (lvl < 0) {
+        const char* e = getenv("HIPCOMPRESS_DEBUG");
+        lvl = (e && *e) ? atoi(e) : 0;
+        if (lvl < 0) lvl = 0;
+    }
+    return lvl;
+}
+
+static const char* hipCompressKernelName(hipCompressKernel k)
+{
+    switch (k) {
+    case HIP_COMPRESS_KERNEL_ZLINE:    return "ZLINE";
+    case HIP_COMPRESS_KERNEL_SEGRLE:   return "SEGRLE";
+    case HIP_COMPRESS_KERNEL_OCTREE:   return "OCTREE";
+    case HIP_COMPRESS_KERNEL_TWOLEVEL: return "TWOLEVEL";
+    case HIP_COMPRESS_KERNEL_QUADTREE: return "QUADTREE";
+    case HIP_COMPRESS_KERNEL_AUTO:     return "AUTO";
+    default:                           return "UNKNOWN";
+    }
+}
+
 hipCompressError_t hipCompressGetLastError(const hipCompressPlan* plan)
 {
     if (!plan) return HIP_COMPRESS_ERROR_NULL_PLAN;
@@ -94,6 +122,7 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     // valid dims; ZLINE remains the fallback for configurations they cannot
     // handle, guarding future constraints so the default flip never breaks
     // callers.  Downstream logic only ever sees the resolved concrete kernel.
+    const hipCompressKernel requested = kernel;
     if (kernel == HIP_COMPRESS_KERNEL_AUTO) {
         kernel = is_2d ? HIP_COMPRESS_KERNEL_QUADTREE
                        : HIP_COMPRESS_KERNEL_OCTREE;
@@ -185,6 +214,30 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     HIPCHECK_PLAN(p, hipStreamSynchronize(aux_stream));
 
     p->last_error = HIP_COMPRESS_SUCCESS;
+
+    if (hipCompressDebugLevel() >= 1) {
+        fprintf(stderr,
+                "[hipCompress] plan: scheme=%s%s dims=%dx%dx%d (%s) blocks=%d\n",
+                hipCompressKernelName(kernel),
+                requested == HIP_COMPRESS_KERNEL_AUTO ? " (AUTO)" : "",
+                nx, ny, nz, is_2d ? "2D" : "3D", nb);
+        if (hipCompressDebugLevel() >= 2) {
+            long coded_bytes = 0;
+            if (kernel == HIP_COMPRESS_KERNEL_OCTREE)
+                coded_bytes = (long)nb * WOCT_CODE_SLOT_BYTES;
+            else if (kernel == HIP_COMPRESS_KERNEL_QUADTREE)
+                coded_bytes = (long)nb * WQT2D_CODE_SLOT_BYTES;
+            else if (kernel == HIP_COMPRESS_KERNEL_TWOLEVEL)
+                coded_bytes = (long)nb * WBMP_TL_SLOT_BYTES;
+            double mib = 1.0 / (1024.0 * 1024.0);
+            fprintf(stderr,
+                    "[hipCompress] mem: scratch=%.1f MiB coded=%.1f MiB "
+                    "scan_temp=%.1f MiB slot_stride=%zuB\n",
+                    (double)scratch_size * mib, (double)coded_bytes * mib,
+                    (double)p->scan_temp_bytes * mib, p->scratch_slot_stride);
+        }
+    }
+
     return hipSuccess;
 }
 
@@ -391,6 +444,15 @@ hipError_t hipCompressSynchronize(
     if (compression_ratio) {
         long total = (long)nx * ny * nz;
         *compression_ratio = (float)((long)total * sizeof(float)) / (float)total_bytes;
+    }
+
+    if (hipCompressDebugLevel() >= 1) {
+        long total = (long)nx * ny * nz;
+        double raw = (double)total * (double)sizeof(float);
+        fprintf(stderr,
+                "[hipCompress] result: scheme=%s bytes=%ld raw=%.0f CR=%.2f\n",
+                hipCompressKernelName(plan->kernel), total_bytes, raw,
+                raw / (double)total_bytes);
     }
 
     plan->compress_pending = false;
