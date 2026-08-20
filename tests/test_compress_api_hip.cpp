@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -97,8 +97,9 @@ static bool test_plan_lifecycle()
     if (err == hipSuccess) { printf("  FAIL: should reject nx=100\n"); hipCompressDestroyPlan(plan); return false; }
     printf("  reject non-32-multiple: PASS\n");
 
-    // MaxOutputSize
-    err = hipCompressCreatePlan(&plan, 64, 64, 64, 0);
+    // MaxOutputSize (ZLINE bound formula -- pin the codec so the expected value
+    // is codec-specific and independent of the dimensionality-selected default)
+    err = hipCompressCreatePlan(&plan, 64, 64, 64, 0, HIP_COMPRESS_KERNEL_ZLINE);
     if (err != hipSuccess) { printf("  FAIL: create 64^3 plan\n"); return false; }
     size_t max_sz = 0;
     HIPCHECK(hipCompressMaxOutputSize(plan, &max_sz));
@@ -182,6 +183,122 @@ static bool test_round_trip()
     return pass;
 }
 
+static bool test_octree_round_trip()
+{
+    printf("Test: Octree compress/decompress round-trip\n");
+    const int N = 128, total = N * N * N;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* oct = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&oct, N, N, N, 0, HIP_COMPRESS_KERNEL_OCTREE));
+    hipCompressPlan* rle = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&rle, N, N, N, 0, HIP_COMPRESS_KERNEL_ZLINE));
+
+    float* d_input = nullptr;
+    float* d_output = nullptr;
+    unsigned char* d_comp = nullptr;
+    unsigned char* d_comp_rle = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+    size_t comp_size = 0;
+    HIPCHECK(hipCompressMaxOutputSize(oct, &comp_size));
+    HIPCHECK(hipMalloc(&d_comp, comp_size));
+    size_t comp_size_rle = 0;
+    HIPCHECK(hipCompressMaxOutputSize(rle, &comp_size_rle));
+    HIPCHECK(hipMalloc(&d_comp_rle, comp_size_rle));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len = 0, len_rle = 0;
+    float cr = 0, cr_rle = 0;
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp, &len, &cr, oct));
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp_rle, &len_rle, &cr_rle, rle));
+    printf("  octree CR=%.2f (%ld B)  RLE CR=%.2f (%ld B)  gain=%.2fx\n",
+           cr, len, cr_rle, len_rle, cr_rle > 0 ? cr / cr_rle : 0.0f);
+
+    HIPCHECK(hipDecompress(d_comp, d_output, oct, 0));
+
+    std::vector<float> h_in(total), h_out(total);
+    HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_out.data(), d_output, total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float max_err = maxAbsError(h_in.data(), h_out.data(), total);
+    printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n",
+           max_err, rms, max_err / rms);
+
+    // Correctness gate: bounded reconstruction + a real compression gain. The
+    // octree-vs-RLE CR delta is a benchmark property (printed above), not a
+    // correctness invariant, so it is not part of the pass condition.
+    bool pass = (max_err < rms) && (cr > 1.0f) && (len > 0);
+    printf("  octree round-trip: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_output); hipFree(d_comp); hipFree(d_comp_rle);
+    hipCompressDestroyPlan(oct);
+    hipCompressDestroyPlan(rle);
+    return pass;
+}
+
+static bool test_twolevel_round_trip()
+{
+    printf("Test: Two-level compress/decompress round-trip\n");
+    const int N = 128, total = N * N * N;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* tl = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&tl, N, N, N, 0, HIP_COMPRESS_KERNEL_TWOLEVEL));
+    hipCompressPlan* rle = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&rle, N, N, N, 0, HIP_COMPRESS_KERNEL_ZLINE));
+    printf("  encoder: %s (gfx950 opt path %s)\n",
+           tl->tl_use_opt ? "opt" : "portable",
+           tl->tl_use_opt ? "active" : "fallback");
+
+    float* d_input = nullptr;
+    float* d_output = nullptr;
+    unsigned char* d_comp = nullptr;
+    unsigned char* d_comp_rle = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+    size_t comp_size = 0;
+    HIPCHECK(hipCompressMaxOutputSize(tl, &comp_size));
+    HIPCHECK(hipMalloc(&d_comp, comp_size));
+    size_t comp_size_rle = 0;
+    HIPCHECK(hipCompressMaxOutputSize(rle, &comp_size_rle));
+    HIPCHECK(hipMalloc(&d_comp_rle, comp_size_rle));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len = 0, len_rle = 0;
+    float cr = 0, cr_rle = 0;
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp, &len, &cr, tl));
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp_rle, &len_rle, &cr_rle, rle));
+    printf("  two-level CR=%.2f (%ld B)  RLE CR=%.2f (%ld B)  gain=%.2fx\n",
+           cr, len, cr_rle, len_rle, cr_rle > 0 ? cr / cr_rle : 0.0f);
+
+    HIPCHECK(hipDecompress(d_comp, d_output, tl, 0));
+
+    std::vector<float> h_in(total), h_out(total);
+    HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_out.data(), d_output, total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float max_err = maxAbsError(h_in.data(), h_out.data(), total);
+    printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n",
+           max_err, rms, max_err / rms);
+
+    bool pass = (max_err < rms) && (cr > 1.0f) && (len > 0);
+    printf("  two-level round-trip: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_output); hipFree(d_comp); hipFree(d_comp_rle);
+    hipCompressDestroyPlan(tl);
+    hipCompressDestroyPlan(rle);
+    return pass;
+}
+
 static bool test_cr_vs_cpu()
 {
     printf("Test 3: CR matches CPU (within z-line gap)\n");
@@ -189,9 +306,10 @@ static bool test_cr_vs_cpu()
     const float scale = 5e-2f;
     const int bx = 32, by = 32, bz = 32;
 
-    // GPU compress
+    // GPU compress -- this test measures the z-line codec's CR against the CPU
+    // reference, so pin ZLINE explicitly (the default is now dimensionality-selected).
     hipCompressPlan* plan = nullptr;
-    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0, HIP_COMPRESS_KERNEL_ZLINE));
 
     float* d_input = nullptr;
     unsigned char* d_compressed = nullptr;
@@ -1664,13 +1782,14 @@ static bool test_wavelet_dims_helper()
     return pass;
 }
 
-static void bench_grid_size(int nx, int ny, int nz, float scale)
+static void bench_grid_size(int nx, int ny, int nz, float scale,
+                            hipCompressKernel kernel, const char* label)
 {
     long total = (long)nx * ny * nz;
     float data_MB = (float)total * sizeof(float) / (1024.0f * 1024.0f);
 
     hipCompressPlan* plan = nullptr;
-    HIPCHECK(hipCompressCreatePlan(&plan, nx, ny, nz, 0));
+    HIPCHECK(hipCompressCreatePlan(&plan, nx, ny, nz, 0, kernel));
 
     float* d_input = nullptr;
     float* d_output = nullptr;
@@ -1715,8 +1834,8 @@ static void bench_grid_size(int nx, int ny, int nz, float scale)
     float fwd_bw = data_MB / fwd_ms * 1000.0f / 1024.0f;
     float inv_bw = data_MB / inv_ms * 1000.0f / 1024.0f;
 
-    printf("  %4dx%4dx%4d  %7.1f  %5.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
-           nx, ny, nz, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
+    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
+           nx, ny, nz, label, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
 
     hipEventDestroy(t0); hipEventDestroy(t1); hipEventDestroy(t2);
     hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
@@ -1727,8 +1846,8 @@ static void bench_throughput()
 {
     const float scale = 5e-2f;
     printf("Benchmark: API throughput, scale=%.0e, sin(40x)sin(40y)sin(40z)\n", scale);
-    printf("  %16s  %7s  %5s  %8s  %8s  %8s  %8s  %5s\n",
-           "grid", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
+    printf("  %16s  %7s  %7s  %6s  %8s  %8s  %8s  %8s  %5s\n",
+           "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
 
     int sizes[][3] = {
         {352, 416, 320},
@@ -1741,8 +1860,13 @@ static void bench_throughput()
         {512, 512, 512},
     };
 
-    for (auto& s : sizes)
-        bench_grid_size(s[0], s[1], s[2], scale);
+    // RLE (z-line) vs octree vs two-level on the API path, same input and
+    // quantization.  Two-level uses the arch-selected encoder (opt on gfx950).
+    for (auto& s : sizes) {
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_ZLINE,    "rle");
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,   "octree");
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_TWOLEVEL, "twolvl");
+    }
 }
 
 static void generateRadialSinc(float* vol, int nx, int ny, int nz,
@@ -2337,7 +2461,10 @@ static bool test_error_codes()
     }
     {
         hipCompressPlan* plan = nullptr;
-        hipError_t err = hipCompressCreatePlan(&plan, 32800, 32768, 32, 0);
+        // 64-bit intra-plane offsets lifted the old 4 GB cap; the remaining
+        // bound is the int plane stride nx*ny (< 2^31 elements).  65536*32768
+        // = 2^31 > INT_MAX, so the guard still rejects (before any hipMalloc).
+        hipError_t err = hipCompressCreatePlan(&plan, 65536, 32768, 32, 0);
         if (!check_error("CreatePlan plane too large", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
             pass = false;
@@ -2582,24 +2709,10 @@ static bool test_error_codes()
     }
 
     // --- Plane too large ---
-    {
-        hipError_t err = hipCopyToWaveletLayout(
-            d_buf, 32768, 1073741825,
-            0, 0, 0,
-            128, 128, 128,
-            d_buf, nullptr, plan, 0);
-        if (!check_error("CopyTo plane too large", plan, err,
-                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
-            pass = false;
-    }
-    {
-        hipError_t err = hipCopyFromWaveletLayout(
-            d_buf, d_buf, 32768, 1073741825,
-            0, 0, 0, 128, 128, 128, plan, 0);
-        if (!check_error("CopyFrom plane too large", plan, err,
-                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
-            pass = false;
-    }
+    // The former CopyTo/CopyFrom "plane too large" (4 GB) rejections were
+    // removed: intra-plane addressing is now 64-bit, so source strides are
+    // bounded only by the int stride type (up to INT_MAX elements) and are no
+    // longer size-capped here.
 
     // --- Decompress errors ---
     {
@@ -2955,9 +3068,11 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 37;
+    int passed = 0, total = 39;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
+    if (test_octree_round_trip())           ++passed;
+    if (test_twolevel_round_trip())         ++passed;
     if (test_cr_vs_cpu())                   ++passed;
     if (test_varying_scale())               ++passed;
     if (test_multiple_cycles())             ++passed;

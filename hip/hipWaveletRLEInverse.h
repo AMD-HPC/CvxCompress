@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -145,16 +145,12 @@ __global__ void waveletRLEInverseFusedKernel(
     float* block_base = output + (size_t)blockIdx.z * 32 * ldimxy;
     int gx = blockIdx.x * 32 + xg * 4;
     int gy = blockIdx.y * 32 + yr;
-    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
+    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
 
     #pragma unroll
-    for (int p = 0; p < PLANES; p++) {
-        auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-            block_base + (long)p * ldimxy,
-            0, -1, 0x00027000);
-        auto v = __builtin_bit_cast(__attribute__((__vector_size__(16))) int, regs[p]);
-        __builtin_amdgcn_raw_buffer_store_b128(v, rsrc, byte_off, 0, SLC);
-    }
+    for (int p = 0; p < PLANES; p++)
+        hipPlaneStoreNT<wrli_float4_vec>(
+            block_base + (size_t)p * ldimxy, byte_off, regs[p]);
 }
 
 inline hipError_t hipWaveletRLEInverseFusedFixedStride(
@@ -280,16 +276,12 @@ __global__ void waveletSegRLEInverseFusedKernel(
     float* block_base_out = output + (size_t)blockIdx.z * 32 * ldimxy;
     int gx = blockIdx.x * 32 + xg * 4;
     int gy = blockIdx.y * 32 + yr;
-    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
+    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
 
     #pragma unroll
-    for (int p = 0; p < PLANES; p++) {
-        auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-            block_base_out + (long)p * ldimxy,
-            0, -1, 0x00027000);
-        auto v = __builtin_bit_cast(__attribute__((__vector_size__(16))) int, regs[p]);
-        __builtin_amdgcn_raw_buffer_store_b128(v, rsrc, byte_off, 0, SLC);
-    }
+    for (int p = 0; p < PLANES; p++)
+        hipPlaneStoreNT<wrli_float4_vec>(
+            block_base_out + (size_t)p * ldimxy, byte_off, regs[p]);
 }
 
 #endif // HIPWAVELET_RLE_INVERSE_H

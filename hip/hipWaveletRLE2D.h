@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -19,6 +19,7 @@
 #include <rocprim/block/block_scan.hpp>
 #include <rocprim/device/device_scan.hpp>
 #include "ds79.h"
+#include "hipPlaneIO.h"
 #include "Run_Length_Escape_Codes.hxx"
 #include "hipRLEDecode.h"
 
@@ -162,12 +163,10 @@ __global__ void waveletRLE2DFusedKernel(
             int gy = blockIdx.y * 32 + yr;
             int x0 = xg * 4;
             if (tile_bx < nbx) {
-                uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
-                auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                    const_cast<float*>(input), 0, -1, 0x00027000);
-                auto v = __builtin_bit_cast(
-                    __attribute__((__vector_size__(4 * sizeof(float)))) float,
-                    __builtin_amdgcn_raw_buffer_load_b128(rsrc, byte_off, 0, SLC));
+                size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
+                auto v = hipPlaneLoadNT<
+                    __attribute__((__vector_size__(4 * sizeof(float)))) float>(
+                    input, byte_off);
                 lds.wavelet[b * 1024 + (x0+0) * 32 + (yr ^ (x0+0))] = v[0];
                 lds.wavelet[b * 1024 + (x0+1) * 32 + (yr ^ (x0+1))] = v[1];
                 lds.wavelet[b * 1024 + (x0+2) * 32 + (yr ^ (x0+2))] = v[2];
@@ -401,12 +400,8 @@ __global__ void waveletRLE2DInverseFusedKernel(
                     if (tb >= nbx) continue;
                     int gx = tb * 32 + xg * 4;
                     int gy = blockIdx.y * 32 + yr;
-                    uint32_t byte_off = (gx + gy * ldimx) * (uint32_t)sizeof(float);
-                    auto rsrc = __builtin_amdgcn_make_buffer_rsrc(
-                        output, 0, -1, 0x00027000);
-                    auto vi = __builtin_bit_cast(
-                        __attribute__((__vector_size__(4 * sizeof(int)))) int, store_regs[s]);
-                    __builtin_amdgcn_raw_buffer_store_b128(vi, rsrc, byte_off, 0, SLC);
+                    size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
+                    hipPlaneStoreNT(output, byte_off, store_regs[s]);
                 }
             }
             __syncthreads();

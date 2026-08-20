@@ -24,7 +24,12 @@ BUILDDIR ?= build
 OBJECTS=CvxCompress.o Wavelet_Transform_Slow.o Wavelet_Transform_Fast.o Run_Length_Encode_Slow.o Block_Copy.o Read_Raw_Volume.o
 
 HIPCC ?= hipcc
+# HIP_ARCH may be a space-separated list to build a fat binary that runs on
+# several GPUs, e.g. HIP_ARCH="gfx942 gfx950" for an MI300x + MI355x binary.
+# The two-level opt encoder is only emitted for gfx950; other arches get a
+# no-op stub and the portable encoder is dispatched at runtime.
 HIP_ARCH ?= gfx90a
+HIP_OFFLOAD = $(foreach a,$(HIP_ARCH),--offload-arch=$(a))
 HIPCFLAGS = -O2 -std=c++17 -fopenmp
 HIPLDFLAGS = -lm
 
@@ -82,11 +87,16 @@ libhipcvxcompress.$(LIB_EXT) : $(HIP_OBJECTS)
 	$(HIPCC) -shared $(HIPLDFLAGS) -o libhipcvxcompress.$(LIB_EXT) $(HIP_OBJECTS)
 
 hip/%.o: hip/%.cpp
-	$(HIPCC) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -fPIC -c $(HIPCFLAGS) hip/$*.cpp -o $@
+	$(HIPCC) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -fPIC -c $(HIPCFLAGS) hip/$*.cpp -o $@
 
 # Buffer-instruction wavelet kernel test
 test_wavelet_buffer_hip: tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -lrocrand -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -lrocrand -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
+
+# Quantization flip-amplification test: production fused kernel (pre-quant coef
+# dump) vs CPU ds79 reference + flip analysis.  Header-only fused path.
+test_quant_flip_amplification_hip: tests/test_quant_flip_amplification_hip.cpp hip/hipWaveletRLE.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc hip/ds79_f4_reg32.inc Run_Length_Escape_Codes.hxx | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_quant_flip_amplification_hip.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_quant_flip_amplification_hip
 
 # Quantize + RLE z-line unit test (CPU-only, no HIP)
 test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx | $(BUILDDIR)
@@ -96,41 +106,65 @@ test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length
 test_zline_cr_benchmark: tests/test_zline_cr_benchmark.cpp hip/quantize_rle_ref.h libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_zline_cr_benchmark.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_zline_cr_benchmark
 
+# Bitmap vs production full-block RLE, four-bucket byte breakdown (CPU-only)
+test_bitmap_vs_cpu_rle: tests/test_bitmap_vs_cpu_rle.cpp Run_Length_Encode_Slow.hxx Run_Length_Escape_Codes.hxx Wavelet_Transform_Fast.hxx Block_Copy.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_bitmap_vs_cpu_rle.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_bitmap_vs_cpu_rle
+
+# Rate-distortion scale sweep on a real seismic panel (CPU-only)
+test_bitmap_rd_panel: tests/test_bitmap_rd_panel.cpp Run_Length_Encode_Slow.hxx Wavelet_Transform_Fast.hxx Block_Copy.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(CXX) $(CFLAGS) $(TFLAG) -I. -Ihip -Itests tests/test_bitmap_rd_panel.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/test_bitmap_rd_panel
+
 # GPU quantize+RLE encode test (validates against CPU reference)
 test_quantize_rle_hip: tests/test_quantize_rle_hip.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx hip/hipQuantizeRLE.h | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -I. -Ihip -Itests tests/test_quantize_rle_hip.cpp -lm -o $(BUILDDIR)/test_quantize_rle_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -I. -Ihip -Itests tests/test_quantize_rle_hip.cpp -lm -o $(BUILDDIR)/test_quantize_rle_hip
 
 # GPU quantize+RLE encode performance benchmark
 test_quantize_rle_perf_hip: tests/test_quantize_rle_perf_hip.cpp Run_Length_Escape_Codes.hxx | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -save-temps=obj -I. -Ihip -Itests tests/test_quantize_rle_perf_hip.cpp -lm -o $(BUILDDIR)/test_quantize_rle_perf_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -save-temps=obj -I. -Ihip -Itests tests/test_quantize_rle_perf_hip.cpp -lm -o $(BUILDDIR)/test_quantize_rle_perf_hip
 
 # Fused inverse (decode + inverse wavelet) test
 test_inverse_fused_hip: tests/test_inverse_fused_hip.cpp hip/hipWaveletRLEInverse.h hip/hipWaveletRLE.h hip/hipRLEDecode.h hip/hipWaveletTransformBuffer.cpp hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_inverse_fused_hip.cpp hip/hipWaveletTransformBuffer.cpp -lm -o $(BUILDDIR)/test_inverse_fused_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_inverse_fused_hip.cpp hip/hipWaveletTransformBuffer.cpp -lm -o $(BUILDDIR)/test_inverse_fused_hip
 
 # Z-line RLE decoder unit test
 test_rle_decode_hip: tests/test_rle_decode_hip.cpp hip/hipRLEDecode.h hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -I. -Ihip -Itests tests/test_rle_decode_hip.cpp -lm -o $(BUILDDIR)/test_rle_decode_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -I. -Ihip -Itests tests/test_rle_decode_hip.cpp -lm -o $(BUILDDIR)/test_rle_decode_hip
 
 # Inverse wavelet transform unit test
 test_inverse_wavelet_hip: tests/test_inverse_wavelet_hip.cpp hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_inverse_wavelet_hip.cpp -lm -o $(BUILDDIR)/test_inverse_wavelet_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_inverse_wavelet_hip.cpp -lm -o $(BUILDDIR)/test_inverse_wavelet_hip
 
 # Fused wavelet+RLE kernel test and benchmark
 test_wavelet_rle_fused_hip: tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipRLEDecode.h hip/hipQuantizeRLE.h hip/hipWaveletTransformBuffer.cpp libcvxcompress.$(LIB_EXT) hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -save-temps=obj -I. -Ihip -Itests tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletTransformBuffer.cpp -L. -lcvxcompress -lm -o $(BUILDDIR)/test_wavelet_rle_fused_hip
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -save-temps=obj -I. -Ihip -Itests tests/test_wavelet_rle_fused_hip.cpp hip/hipWaveletTransformBuffer.cpp -L. -lcvxcompress -lm -o $(BUILDDIR)/test_wavelet_rle_fused_hip
 
 # hipCompress public API test
-test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/test_compress_api_hip
+test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/hipWaveletQuadtree2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/test_compress_api_hip
 
 # 2D compression test
-test_compress_2d_hip: tests/test_compress_2d_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipWaveletRLE2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_2d_hip.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/test_compress_2d_hip
+test_compress_2d_hip: tests/test_compress_2d_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/hipWaveletRLE2D.h hip/hipWaveletQuadtree2D.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_2d_hip.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/test_compress_2d_hip
+
+# Bitmap-significance-split encode (kernel 1) validation vs RLE ground truth
+test_bitmap_encode_hip: tests/test_bitmap_encode_hip.cpp hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_encode_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_encode_hip
+
+# Bitmap-significance-split coding (kernel 2): correctness + CR + throughput
+test_bitmap_code_hip: tests/test_bitmap_code_hip.cpp hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_code_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_code_hip
+
+# Octree significance coder (kernel 2 variant): round-trip + CR + throughput
+test_bitmap_octree_hip: tests/test_bitmap_octree_hip.cpp hip/hipWaveletOctree.h hip/hipWaveletBitmap.h hip/hipWaveletRLE.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_bitmap_octree_hip.cpp -lm -o $(BUILDDIR)/test_bitmap_octree_hip
+
+# 2D quadtree (GPU) vs CvxCompress (CPU) rate-distortion comparison on real data
+bench_quadtree_vs_cvx_2d: tests/bench_quadtree_vs_cvx_2d.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipWaveletQuadtree2D.h hip/hipWaveletRLE2D.h hip/hipBlockCopy.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc CvxCompress.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/bench_quadtree_vs_cvx_2d.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/bench_quadtree_vs_cvx_2d
 
 # Async pipeline example (for profiling)
 example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipBlockCopy.h hip/hipWaveletRLE.h hip/hipWaveletRLEInverse.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
-	$(HIPCC) $(HIPCFLAGS) --offload-arch=$(HIP_ARCH) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/example_async_pipeline.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/example_async_pipeline
+	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/example_async_pipeline.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/example_async_pipeline
 
 clean:
 	rm -f *.o
