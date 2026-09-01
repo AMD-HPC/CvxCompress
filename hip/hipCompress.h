@@ -170,8 +170,11 @@ hipError_t hipCopyFromWaveletLayout(
 //                  smaller scale → finer quantization → lower error, lower CR.
 //   d_rms == NULL: mulfac = scale.  Caller supplies mulfac directly.
 //
-// Fused wavelet+RLE and scan run on user_stream.
-// Compact and D2H readback run on aux_stream (internal event bridge).
+// Only k1 (fused wavelet + quantize + bitmap/RLE) runs on user_stream; it is
+// bandwidth-bound and reads the caller's live input. Entropy coding, the size
+// scan, compaction and D2H readback all run on aux_stream via an internal event
+// bridge, so they overlap whatever the caller launches next. Pass an aux_stream
+// distinct from user_stream or the split is a no-op.
 // Rejects with hipErrorNotReady if a previous compress has not been
 // synchronized via hipCompressSynchronize.
 // Call hipCompressSynchronize to retrieve compressed_length and CR.
