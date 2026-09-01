@@ -681,7 +681,11 @@ __global__ void waveletOctreeCodeParKernel(
     int oct_total = 1 + n16 + n8 + n4 + n2;
     int mode = (rootocc && oct_total < WOCT_FLAT_SIG_BYTES) ? 2 : (rootocc ? 0 : 2);
     int sig_bytes = (mode==2) ? (rootocc ? oct_total : 0) : WOCT_FLAT_SIG_BYTES;
-    if (tid==0){ blk_out[0] = (unsigned char)mode; sig_sizes[bid] = (size_t)sig_bytes; }
+    // Header is WOCT_HDR_BYTES=4 but carries only the mode byte.  Store it as a
+    // u32 so bytes 1..3 are written zero rather than left as whatever the slot
+    // buffer last held -- compaction copies them into the output stream.
+    if (tid==0){ *reinterpret_cast<uint32_t*>(blk_out) = (uint32_t)mode;
+                 sig_sizes[bid] = (size_t)sig_bytes; }
 
     if (mode==2 && rootocc) {                   // octree significance
         int base16=1, base8=1+n16, base4=1+n16+n8, base2=1+n16+n8+n4;
@@ -721,6 +725,10 @@ __global__ void waveletOctreeCodeParKernel(
     // Wlo<Whi)][base: Wlo low bytes per nonzero][patch: (Whi-Wlo) high bytes per
     // exception].  All streams fixed-width/byte-aligned -> coalesced GPU decode.
     long val_base = ((long)WOCT_HDR_BYTES + sig_bytes + 3) & ~3L;
+    // <=3 B of alignment slack between the significance region and val_base.
+    // Never read on decode, but it is inside block_sizes2 and lands in the
+    // stream, so it has to be written to keep the output reproducible.
+    if (tid==0) for (long p=(long)WOCT_HDR_BYTES+sig_bytes; p<val_base; ++p) blk_out[p]=0;
     int nz = __popc(m);
     int in_off, occ_rank_u, tot_nz, tot_ne_u;
     block_exscan2(nz, m ? 1 : 0, in_off, occ_rank_u, tot_nz, tot_ne_u, warp_part);
@@ -768,7 +776,10 @@ __global__ void waveletOctreeCodeParKernel(
     uint32_t* mp = reinterpret_cast<uint32_t*>(blk_out + mask_base);
     for (int i=tid;i<mask_words;i+=1024) mp[i]=0;
     __syncthreads();
-    if (tid==0) blk_out[val_base] = (unsigned char)((Whi << 4) | Wlo);
+    // Wbyte occupies 1 of the 4 B reserved before mask_base; store it as a u32
+    // (val_base is 4-aligned by construction) so the 3 pad bytes are zero.
+    if (tid==0) *reinterpret_cast<uint32_t*>(blk_out + val_base) =
+                    (uint32_t)((Whi << 4) | Wlo);
 
     if (nz) {
         int local_ex = 0;
@@ -787,7 +798,13 @@ __global__ void waveletOctreeCodeParKernel(
             }
         }
     }
-    if (tid==0) block_sizes2[bid] = (size_t)(patch_base + (long)tot_ex * (Whi - Wlo));
+    // woctAlignSizes rounds this length up to 4 afterwards; zero the <=3 B that
+    // rounding exposes, since compaction will copy them into the stream.
+    if (tid==0){
+        long end = patch_base + (long)tot_ex * (Whi - Wlo);
+        for (long p=end; p<((end+3)&~3L); ++p) blk_out[p]=0;
+        block_sizes2[bid] = (size_t)end;
+    }
 }
 
 inline hipError_t hipWaveletOctreeCode(
