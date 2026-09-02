@@ -262,13 +262,42 @@ loader plus the runtime dispatch pick the correct one for the GPU in use.
 
 ### Two-Stream Model
 
-- **`user_stream`**: passed to each API call. The wavelet transform and value
-  encoding run here. The stream is free immediately after `hipCompress` returns.
-- **`aux_stream`**: owned by the user, passed at plan creation. Compaction, header
-  writing, and D2H readback run here. Shared across plans.
+The encode chain is
 
-An internal event bridges the two streams. This design lets simulation kernels
-continue on `user_stream` while compression finishes on `aux_stream`.
+```
+transform  ->  encode  ->  scan  ->  compact  ->  D2H readback
+```
+
+where *transform* is the fused wavelet + quantize + significance pass and
+*encode* is the entropy coder. ZLINE and SEGRLE have no separate encode stage —
+their transform emits block sizes directly.
+
+- **`user_stream`**: passed to each API call. The transform always runs here; it
+  is bandwidth-bound and reads the caller's live input buffer, so moving it off
+  `user_stream` only steals HBM from the caller. The stream is free as soon as
+  the stages that stayed on it have been enqueued.
+- **`aux_stream`**: owned by the user, passed at plan creation. Shared across
+  plans. Which stages it picks up is set by the `aux_from` argument to
+  `hipCompressCreatePlan`:
+
+| `hipCompressAuxStage` | Runs on `aux_stream` |
+|---|---|
+| `HIP_COMPRESS_AUX_NONE` | nothing — the whole chain is serial on `user_stream` |
+| `HIP_COMPRESS_AUX_FROM_COMPACT` | scan, compaction, header write, D2H readback (**default**) |
+| `HIP_COMPRESS_AUX_FROM_ENCODE` | the entropy coder and its size-alignment pass, plus all of the above |
+
+An internal event bridges the two streams at whichever boundary `aux_from`
+selects. This lets simulation kernels continue on `user_stream` while the tail
+of compression finishes on `aux_stream`.
+
+`aux_from` is a **placement** knob, not a correctness one: all three settings
+produce byte-identical output. It is also not a free win. Measured against a
+wave propagation kernel that already saturates the GPU (512³ TTI, snapshot every
+7 steps, MI355X), `FROM_ENCODE` runs 3–4% *slower* than `NONE` — the entropy
+coder is a throughput kernel with no idle slack to reclaim, so co-residency costs
+more than the hiding saves. Profile your own caller before moving off the
+default. Passing the same stream as both `aux_stream` and `user_stream` makes the
+split a no-op regardless of `aux_from`.
 
 ## Error Handling
 

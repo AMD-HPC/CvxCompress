@@ -46,6 +46,36 @@ enum hipCompressKernel {
                                        // coders cannot handle.
 };
 
+// Which stage of the encode chain aux_stream picks up from. The chain is
+//
+//   transform -> encode -> scan -> compact -> D2H readback
+//
+// where "transform" is the fused wavelet + quantize + significance pass and
+// "encode" is the entropy coder (octree/two-level/quadtree significance + PFOR
+// values). ZLINE and SEGRLE have no separate encode stage -- their transform
+// emits block sizes directly -- so FROM_ENCODE and FROM_COMPACT are the same
+// thing for those codecs.
+//
+// Transform never moves: it is bandwidth-bound and reads the caller's live
+// input buffer, so overlapping it only steals HBM from the caller.
+//
+// This is a placement knob, not a correctness one: all three settings produce
+// byte-identical output. It is also not a free win. Measured against a wave
+// propagation kernel that already saturates the GPU, FROM_ENCODE is 2-4% SLOWER
+// than NONE, because the entropy coder is a throughput kernel with no idle
+// slack to reclaim and co-residency costs more than the hiding saves. See
+// rtm_storage/hipcvx_overlap_findings.md, sections 3f and 3h. Profile your own
+// caller before moving off the default.
+typedef enum {
+    // aux_stream unused; the whole chain runs on user_stream.
+    HIP_COMPRESS_AUX_NONE = 0,
+    // Scan, compaction and the D2H readback run on aux_stream. Default.
+    HIP_COMPRESS_AUX_FROM_COMPACT = 1,
+    // Entropy coding onward runs on aux_stream (adds the encode stage and its
+    // size-alignment pass to the above).
+    HIP_COMPRESS_AUX_FROM_ENCODE = 2,
+} hipCompressAuxStage;
+
 struct hipCompressPlan {
     hipCompressKernel kernel;
     int nx, ny, nz;
@@ -80,9 +110,17 @@ struct hipCompressPlan {
     double* d_rms;
 
     hipStream_t aux_stream;
+    // Read fresh on every hipCompress call, so it may be changed between calls
+    // (but not while compress_pending is true) to move the split per snapshot.
+    hipCompressAuxStage aux_from;
     hipEvent_t  ready_event;
     size_t* h_staging;  // pinned host, 2 values: [offsets[nb-1], sizes[nb-1]]
 
+    // Stream the D2H readback of the pending compress was enqueued on, i.e. the
+    // one hipCompressSynchronize must block on. Equals aux_stream except at
+    // AUX_NONE, where the tail stays on the caller's user_stream and syncing
+    // aux_stream would return without waiting for anything.
+    hipStream_t pending_stream;
     bool compress_pending;  // true between hipCompress and hipCompressSynchronize
     mutable hipCompressError_t last_error;
 };
@@ -109,7 +147,8 @@ hipError_t hipCompressCreatePlan(
     hipCompressPlan** plan,
     int nx, int ny, int nz,
     hipStream_t aux_stream,
-    hipCompressKernel kernel = HIP_COMPRESS_KERNEL_AUTO);
+    hipCompressKernel kernel = HIP_COMPRESS_KERNEL_AUTO,
+    hipCompressAuxStage aux_from = HIP_COMPRESS_AUX_FROM_COMPACT);
 
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 
@@ -170,11 +209,11 @@ hipError_t hipCopyFromWaveletLayout(
 //                  smaller scale → finer quantization → lower error, lower CR.
 //   d_rms == NULL: mulfac = scale.  Caller supplies mulfac directly.
 //
-// Only k1 (fused wavelet + quantize + bitmap/RLE) runs on user_stream; it is
-// bandwidth-bound and reads the caller's live input. Entropy coding, the size
-// scan, compaction and D2H readback all run on aux_stream via an internal event
-// bridge, so they overlap whatever the caller launches next. Pass an aux_stream
-// distinct from user_stream or the split is a no-op.
+// The fused wavelet + quantize + significance pass always runs on user_stream.
+// Which of the later stages run on aux_stream is set by plan->aux_from (see
+// hipCompressAuxStage); they are bridged across with an internal event. Passing
+// the same stream as both aux_stream and user_stream makes the split a no-op
+// regardless of aux_from.
 // Rejects with hipErrorNotReady if a previous compress has not been
 // synchronized via hipCompressSynchronize.
 // Call hipCompressSynchronize to retrieve compressed_length and CR.

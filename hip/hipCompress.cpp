@@ -88,7 +88,8 @@ const char* hipCompressErrorString(hipCompressError_t err)
 }
 
 hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
-                                 hipStream_t aux_stream, hipCompressKernel kernel)
+                                 hipStream_t aux_stream, hipCompressKernel kernel,
+                                 hipCompressAuxStage aux_from)
 {
     if (!plan)
         return hipErrorInvalidValue;
@@ -132,6 +133,8 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     p->nx = nx; p->ny = ny; p->nz = nz;
     p->is_2d = is_2d;
     p->aux_stream = aux_stream;
+    p->aux_from = aux_from;
+    p->pending_stream = aux_stream;
     p->compress_pending = false;
     p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
 
@@ -291,27 +294,38 @@ hipError_t hipCompress(
                        ? hipOctreeHeaderSize(nb, num_mulfacs)
                        : hipCompressHeaderSize(nb, num_mulfacs);
     hipStream_t s = user_stream;
-    hipStream_t aux = plan->aux_stream;
+    // AUX_NONE collapses aux onto the user stream, which makes every "aux"
+    // launch below run in order on s and turns bridge() into a no-op.
+    hipStream_t aux = (plan->aux_from == HIP_COMPRESS_AUX_NONE)
+                    ? user_stream : plan->aux_stream;
+    // Stream for the entropy-coding stage. It moves to aux only when the caller
+    // asked aux to pick up from there; at FROM_COMPACT it stays with the
+    // transform and only scan/compact/D2H cross over.
+    hipStream_t enc = (plan->aux_from == HIP_COMPRESS_AUX_FROM_ENCODE) ? aux : s;
 
-    // Bridge to aux_stream. k1 (wavelet + quantize + bitmap) is the only stage
-    // that stays on user_stream: it is bandwidth-bound and reads the caller's
-    // live input, so overlapping it would only steal HBM from the caller.
-    // Everything downstream — k2 entropy coding, size scan, compaction, D2H —
-    // is either ALU-bound or trivial and runs on aux_stream, where it can hide
-    // under whatever the caller launches next.
+    // Bridge to aux_stream. The transform (wavelet + quantize + significance)
+    // never moves: it is bandwidth-bound and reads the caller's live input, so
+    // overlapping it would only steal HBM from the caller.
     //
-    // Called right after k1 in each codec path; the trailing call covers the
-    // paths where k1 emits block sizes directly and there is no k2.
+    // Fires once, at the boundary plan->aux_from selects: before the entropy
+    // coder at FROM_ENCODE, otherwise at the trailing call below (which also
+    // covers ZLINE/SEGRLE, whose transform emits block sizes directly and which
+    // therefore have no entropy-coding stage to split at).
     bool bridged = false;
     auto bridge = [&]() -> hipError_t {
-        if (bridged) return hipSuccess;
+        if (bridged || aux == s) return hipSuccess;
         bridged = true;
         hipError_t e = hipEventRecord(plan->ready_event, s);
         if (e != hipSuccess) return e;
         return hipStreamWaitEvent(aux, plan->ready_event, 0);
     };
+    // Guarded so the event bridge is not crossed early at FROM_COMPACT.
+    auto bridge_before_encode = [&]() -> hipError_t {
+        return (enc == aux) ? bridge() : hipSuccess;
+    };
 
-    // 1. Fused wavelet + quantize + encode → scratch (k1 user_stream, k2 aux)
+    // 1. Transform: fused wavelet + quantize + significance → scratch (always
+    //    user_stream), then the entropy coder on `enc`.
     if (plan->is_2d) {
         int nbx = nx / 32, nby = ny / 32;
         dim3 grid((nbx + WRLE2D_TILES_PER_WG - 1) / WRLE2D_TILES_PER_WG, nby);
@@ -320,11 +334,11 @@ hipError_t hipCompress(
             waveletQuadtree2DForwardKernel<<<grid, dim3(256), 0, s>>>(
                 d_input, reinterpret_cast<int*>(plan->d_scratch),
                 scale, ldimx, nbx, d_rms, plan->d_mulfac);
-            HIPCHECK_PLAN(plan, bridge());
-            // k2: quadtree significance + width table + packed values → coded
-            // slots.  d_block_sizes := coded length; d_octree_sig_sizes :=
-            // significance length (both per block, for scan + header).
-            waveletQuadtree2DCodeKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, aux>>>(
+            HIPCHECK_PLAN(plan, bridge_before_encode());
+            // encode: quadtree significance + width table + packed values →
+            // coded slots.  d_block_sizes := coded length; d_octree_sig_sizes
+            // := significance length (both per block, for scan + header).
+            waveletQuadtree2DCodeKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, enc>>>(
                 reinterpret_cast<const int*>(plan->d_scratch), plan->d_octree_coded,
                 plan->d_block_sizes, plan->d_octree_sig_sizes);
         } else {
@@ -342,33 +356,33 @@ hipError_t hipCompress(
                 d_input, plan->d_scratch, plan->d_block_sizes,
                 scale, ldimx, ldimxy,
                 d_rms, plan->d_mulfac);
-            HIPCHECK_PLAN(plan, bridge());
-            // k2: octree significance + width table + packed values → coded
+            HIPCHECK_PLAN(plan, bridge_before_encode());
+            // encode: octree significance + width table + packed values → coded
             // slots.  d_block_sizes := coded length; d_octree_sig_sizes :=
             // significance length (both per block, for scan + header).
-            waveletOctreeCodeParKernel<<<nb, dim3(WOCT_PAR_THREADS), 0, aux>>>(
+            waveletOctreeCodeParKernel<<<nb, dim3(WOCT_PAR_THREADS), 0, enc>>>(
                 plan->d_scratch, plan->d_octree_coded,
                 plan->d_block_sizes, plan->d_octree_sig_sizes);
             // 4-align each coded length so packed blocks keep uint32 reads
             // (width table / flat masks) aligned in the compacted stream.
-            waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, aux);
+            waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, enc);
         } else if (plan->kernel == HIP_COMPRESS_KERNEL_TWOLEVEL) {
             // k1: wavelet ZYX + quantize → [bitmap][packed int32] in d_scratch.
             waveletBitmapFusedKernel<<<grid, dim3(256), 0, s>>>(
                 d_input, plan->d_scratch, plan->d_block_sizes,
                 scale, ldimx, ldimxy,
                 d_rms, plan->d_mulfac);
-            HIPCHECK_PLAN(plan, bridge());
-            // k2: two-level occupancy + width table + packed values → coded
+            HIPCHECK_PLAN(plan, bridge_before_encode());
+            // encode: two-level occupancy + width table + packed values → coded
             // slots.  Arch-selected encoder; both emit the identical stream.
             if (plan->tl_use_opt)
-                waveletBitmapCodeTwoLevelOptKernel<<<nb, dim3(wbmp_opt::WBMP_OPT_THREADS), 0, aux>>>(
+                waveletBitmapCodeTwoLevelOptKernel<<<nb, dim3(wbmp_opt::WBMP_OPT_THREADS), 0, enc>>>(
                     plan->d_scratch, nullptr, plan->d_octree_coded, plan->d_block_sizes);
             else
-                waveletBitmapCodeTwoLevelKernel<<<nb, dim3(256), 0, aux>>>(
+                waveletBitmapCodeTwoLevelKernel<<<nb, dim3(256), 0, enc>>>(
                     plan->d_scratch, nullptr, plan->d_octree_coded, plan->d_block_sizes);
             // 4-align each coded length (uint32 occupancy/mask/width reads).
-            waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, aux);
+            waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, enc);
         } else if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
             waveletSegRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
                 d_input, plan->d_scratch, plan->d_block_sizes,
@@ -382,7 +396,8 @@ hipError_t hipCompress(
         }
     }
 
-    // 2. Bridge for the codecs whose k1 emits block sizes directly (no k2).
+    // 2. Bridge at the compaction boundary. A no-op if FROM_ENCODE already
+    //    crossed above, or if aux and user are the same stream.
     HIPCHECK_PLAN(plan, bridge());
 
     // 3. Exclusive scan for compaction offsets (aux_stream)
@@ -426,6 +441,7 @@ hipError_t hipCompress(
     HIPCHECK_PLAN(plan, hipMemcpyAsync(&plan->h_staging[1], plan->d_block_sizes + (nb - 1),
                             sizeof(size_t), hipMemcpyDeviceToHost, aux));
 
+    plan->pending_stream = aux;
     plan->compress_pending = true;
     return hipSuccess;
 }
@@ -440,7 +456,7 @@ hipError_t hipCompressSynchronize(
     if (!plan->compress_pending)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING, hipErrorNotReady);
 
-    HIPCHECK_PLAN(plan, hipStreamSynchronize(plan->aux_stream));
+    HIPCHECK_PLAN(plan, hipStreamSynchronize(plan->pending_stream));
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int nb = plan->num_blocks;
