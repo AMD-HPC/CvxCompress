@@ -56,28 +56,28 @@ struct Ctx {
     float mulfac;
 };
 static void launch_rle(void* p){ Ctx*c=(Ctx*)p; dim3 g(c->nbx,c->nby,c->nbz);
-    waveletRLEFusedKernel<<<g,dim3(256)>>>(c->d_in,c->d_rle,c->d_rle_sizes,c->mulfac,c->ldimx,c->ldimxy,nullptr,nullptr); }
+    hipcvx_waveletRLEFusedKernel<<<g,dim3(256)>>>(c->d_in,c->d_rle,c->d_rle_sizes,c->mulfac,c->ldimx,c->ldimxy,nullptr,nullptr); }
 static void launch_bmp(void* p){ Ctx*c=(Ctx*)p; dim3 g(c->nbx,c->nby,c->nbz);
-    waveletBitmapFusedKernel<<<g,dim3(256)>>>(c->d_in,c->d_bmp,c->d_bmp_sizes,c->mulfac,c->ldimx,c->ldimxy,nullptr,nullptr); }
+    hipcvx_waveletBitmapFusedKernel<<<g,dim3(256)>>>(c->d_in,c->d_bmp,c->d_bmp_sizes,c->mulfac,c->ldimx,c->ldimxy,nullptr,nullptr); }
 static void launch_codetl(void* p){ Ctx*c=(Ctx*)p;
-    waveletBitmapCodeTwoLevelKernel<<<c->nblocks,dim3(256)>>>(c->d_bmp,c->d_bmp_sizes,c->d_codetl,c->d_codetl_sizes); }
+    hipcvx_waveletBitmapCodeTwoLevelKernel<<<c->nblocks,dim3(256)>>>(c->d_bmp,c->d_bmp_sizes,c->d_codetl,c->d_codetl_sizes); }
 static void launch_oct_enc(void* p){ Ctx*c=(Ctx*)p;
-    waveletOctreeSigEncodeKernel<<<c->nblocks,dim3(c->enc_threads)>>>(c->d_bmp,c->d_oct,c->d_oct_sizes); }
+    hipcvx_waveletOctreeSigEncodeKernel<<<c->nblocks,dim3(c->enc_threads)>>>(c->d_bmp,c->d_oct,c->d_oct_sizes); }
 static void launch_oct_dec(void* p){ Ctx*c=(Ctx*)p;
-    waveletOctreeSigDecodeKernel<<<c->nblocks,dim3(c->enc_threads)>>>(c->d_oct,c->d_oct_sizes,c->d_dec_masks); }
+    hipcvx_waveletOctreeSigDecodeKernel<<<c->nblocks,dim3(c->enc_threads)>>>(c->d_oct,c->d_oct_sizes,c->d_dec_masks); }
 static void launch_octp_enc(void* p){ Ctx*c=(Ctx*)p;
-    waveletOctreeSigEncodeParKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_bmp,c->d_octp,c->d_octp_sizes); }
+    hipcvx_waveletOctreeSigEncodeParKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_bmp,c->d_octp,c->d_octp_sizes); }
 static void launch_octp_dec(void* p){ Ctx*c=(Ctx*)p;
-    waveletOctreeSigDecodeParKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_octp,c->d_octp_sizes,c->d_decp_masks); }
+    hipcvx_waveletOctreeSigDecodeParKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_octp,c->d_octp_sizes,c->d_decp_masks); }
 static void launch_octc(void* p){ Ctx*c=(Ctx*)p;
-    waveletOctreeCodeParKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_bmp,c->d_octc,c->d_octc_sizes,c->d_octc_sig_sizes); }
+    hipcvx_waveletOctreeCodeParKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_bmp,c->d_octc,c->d_octc_sizes,c->d_octc_sig_sizes); }
 static void launch_octA(void* p){ Ctx*c=(Ctx*)p;   // decode stage A: coded -> bitmap+values
-    waveletOctreeDecodeToBitmapKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_octc,c->d_octc_sig_sizes,c->d_bmp2,c->d_bmp2_sizes); }
+    hipcvx_waveletOctreeDecodeToBitmapKernel<<<c->nblocks,dim3(WOCT_PAR_THREADS)>>>(c->d_octc,c->d_octc_sig_sizes,c->d_bmp2,c->d_bmp2_sizes); }
 static void launch_octB(void* p){ Ctx*c=(Ctx*)p;   // decode stage B: bitmap+values -> field
     dim3 g(c->nbx,c->nby,c->nbz);
-    waveletBitmapInverseFusedKernel<<<g,dim3(256)>>>(c->d_bmp2,c->d_field_oct,1.0f/c->mulfac,c->ldimx,c->ldimxy); }
+    hipcvx_waveletBitmapInverseFusedKernel<<<g,dim3(256)>>>(c->d_bmp2,c->d_field_oct,1.0f/c->mulfac,c->ldimx,c->ldimxy); }
 static void launch_rle_inv(void* p){ Ctx*c=(Ctx*)p; dim3 g(c->nbx,c->nby,c->nbz);
-    waveletRLEInverseFusedKernel<<<g,dim3(256)>>>(c->d_rle,c->d_rle_sizes,nullptr,c->d_field_rle,1.0f/c->mulfac,c->ldimx,c->ldimxy,0); }
+    hipcvx_waveletRLEInverseFusedKernel<<<g,dim3(256)>>>(c->d_rle,c->d_rle_sizes,nullptr,c->d_field_rle,1.0f/c->mulfac,c->ldimx,c->ldimxy,0); }
 
 static bool load_center_crop(const std::string& path,int gnz,int gny,int gnx,
                              int cz,int cy,int cx,std::vector<float>& out,

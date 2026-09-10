@@ -18,7 +18,7 @@
 //     the final coded stream (fixed-width / width-class / bit-plane).
 //
 // Phases 1-3 (load, Z-transform, Y+X transform) are identical to
-// waveletRLEFusedKernel in hipWaveletRLE.h, so the quantized nonzero set and
+// hipcvx_waveletRLEFusedKernel in hipWaveletRLE.h, so the quantized nonzero set and
 // values are bit-for-bit identical to the RLE path (used for validation).
 
 #include <hip/hip_runtime.h>
@@ -34,7 +34,7 @@ static constexpr int  WBMP_MAX_VAL_BYTES = 32768 * 4;                 // 131072
 static constexpr long WBMP_SLOT_BYTES     = WBMP_BITMAP_BYTES + WBMP_MAX_VAL_BYTES; // 135168
 
 __launch_bounds__(256, 2)
-__global__ void waveletBitmapFusedKernel(
+__global__ void hipcvx_waveletBitmapFusedKernel(
     const float* __restrict__ input,
     unsigned char* __restrict__ output,
     size_t* __restrict__ block_sizes,
@@ -192,7 +192,7 @@ __host__ __device__ __forceinline__ int wbmp_width_bytes(int maxabs) {
 //   coded block bytes = 4096 + 4 + nnz*W
 // ---------------------------------------------------------------------------
 __launch_bounds__(256, 4)
-__global__ void waveletBitmapCodeKernel(
+__global__ void hipcvx_waveletBitmapCodeKernel(
     const unsigned char* __restrict__ scratch1,
     const size_t* __restrict__ block_sizes1,
     unsigned char* __restrict__ out,
@@ -251,7 +251,7 @@ inline hipError_t hipWaveletBitmapCode(
     int nblocks,
     hipStream_t stream = 0)
 {
-    waveletBitmapCodeKernel<<<nblocks, dim3(256), 0, stream>>>(
+    hipcvx_waveletBitmapCodeKernel<<<nblocks, dim3(256), 0, stream>>>(
         scratch1, block_sizes1, out, block_sizes2);
     return hipGetLastError();
 }
@@ -277,7 +277,7 @@ __device__ __forceinline__ int wbmp_line_width(const int32_t* v, int n) {
 }
 
 __launch_bounds__(256, 4)
-__global__ void waveletBitmapCodePerLineKernel(
+__global__ void hipcvx_waveletBitmapCodePerLineKernel(
     const unsigned char* __restrict__ scratch1,
     const size_t* __restrict__ block_sizes1,
     unsigned char* __restrict__ out,
@@ -350,7 +350,7 @@ inline hipError_t hipWaveletBitmapCodePerLine(
     int nblocks,
     hipStream_t stream = 0)
 {
-    waveletBitmapCodePerLineKernel<<<nblocks, dim3(256), 0, stream>>>(
+    hipcvx_waveletBitmapCodePerLineKernel<<<nblocks, dim3(256), 0, stream>>>(
         scratch1, block_sizes1, out, block_sizes2);
     return hipGetLastError();
 }
@@ -370,7 +370,7 @@ static constexpr long WBMP_TL_SLOT_BYTES =
     WBMP_OCC_BYTES + WBMP_BITMAP_BYTES + WBMP_WTAB_BYTES + WBMP_MAX_VAL_BYTES;
 
 __launch_bounds__(256, 4)
-__global__ void waveletBitmapCodeTwoLevelKernel(
+__global__ void hipcvx_waveletBitmapCodeTwoLevelKernel(
     const unsigned char* __restrict__ scratch1,
     const size_t* __restrict__ block_sizes1,
     unsigned char* __restrict__ out,
@@ -469,7 +469,7 @@ inline hipError_t hipWaveletBitmapCodeTwoLevel(
     int nblocks,
     hipStream_t stream = 0)
 {
-    waveletBitmapCodeTwoLevelKernel<<<nblocks, dim3(256), 0, stream>>>(
+    hipcvx_waveletBitmapCodeTwoLevelKernel<<<nblocks, dim3(256), 0, stream>>>(
         scratch1, block_sizes1, out, block_sizes2);
     return hipGetLastError();
 }
@@ -477,7 +477,7 @@ inline hipError_t hipWaveletBitmapCodeTwoLevel(
 // ---------------------------------------------------------------------------
 // Kernel 2 (coding), TWO-LEVEL occupancy + per-line width -- OPTIMIZED.
 //
-// Byte-for-byte identical output to waveletBitmapCodeTwoLevelKernel (occupancy,
+// Byte-for-byte identical output to hipcvx_waveletBitmapCodeTwoLevelKernel (occupancy,
 // masks, 2-bit width table and packed values in the same layout and order), so
 // the existing decoder is unchanged. It is faster because of six levers found by
 // the polyopt round-3 campaign (worker continue_1_s2, mean 1.59x on gfx950; the
@@ -642,7 +642,7 @@ __device__ __forceinline__ void pack_line(unsigned char* out, long p, const int3
 }  // namespace wbmp_opt
 
 __launch_bounds__(wbmp_opt::WBMP_OPT_THREADS)
-__global__ void waveletBitmapCodeTwoLevelOptKernel(
+__global__ void hipcvx_waveletBitmapCodeTwoLevelOptKernel(
     const unsigned char* __restrict__ scratch1,
     const size_t* __restrict__ block_sizes1,
     unsigned char* __restrict__ out,
@@ -653,7 +653,7 @@ __global__ void waveletBitmapCodeTwoLevelOptKernel(
 // every other target (gfx942/gfx90a: 64 KB LDS, and the host pass) it compiles
 // to an empty stub so the translation unit builds portably; the host dispatch
 // (hipCompress) only ever launches it on gfx950 and falls back to
-// waveletBitmapCodeTwoLevelKernel elsewhere.  Both kernels emit byte-identical
+// hipcvx_waveletBitmapCodeTwoLevelKernel elsewhere.  Both kernels emit byte-identical
 // two-level streams, so the decoder is arch-independent.
 #if defined(__gfx950__)
     using namespace wbmp_opt;
@@ -764,7 +764,7 @@ inline hipError_t hipWaveletBitmapCodeTwoLevelOpt(
     int nblocks,
     hipStream_t stream = 0)
 {
-    waveletBitmapCodeTwoLevelOptKernel<<<nblocks, dim3(wbmp_opt::WBMP_OPT_THREADS), 0, stream>>>(
+    hipcvx_waveletBitmapCodeTwoLevelOptKernel<<<nblocks, dim3(wbmp_opt::WBMP_OPT_THREADS), 0, stream>>>(
         scratch1, block_sizes1, out, block_sizes2);
     return hipGetLastError();
 }
@@ -779,8 +779,8 @@ inline hipError_t hipWaveletBitmapCodeTwoLevelOpt(
 // self-describing -- popcount(occupancy) recovers every region base -- so unlike
 // the octree stream it needs no per-block significance-size table; the header is
 // exactly hipCompressHeaderSize(nb, nmf).  dst points to the payload (after the
-// header).  Mirrors woctCompactKernel / wrleCompactKernel.
-__global__ void wtlCompactKernel(
+// header).  Mirrors hipcvx_woctCompactKernel / hipcvx_wrleCompactKernel.
+__global__ void hipcvx_wtlCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
     const size_t* __restrict__ block_sizes,
@@ -824,7 +824,7 @@ __global__ void wtlCompactKernel(
 // [4096B bitmap (L order)][packed int32 values] for one block from its coded
 // bytes [128B occupancy][4B*n_ne masks][2b/nonempty-line widths][values].
 // Exact inverse of the two-level coder's packing, so the output is byte-
-// identical to the waveletBitmapFusedKernel (kernel-1) output and feeds the
+// identical to the hipcvx_waveletBitmapFusedKernel (kernel-1) output and feeds the
 // shared inverse-wavelet stage B unchanged.  One workgroup of 1024 threads per
 // block, one z-line (L index) per thread.  Portable: only wave64 DPP block
 // scans, no arch-specific LDS budget (~128 B shared), so it runs on gfx90a/
@@ -883,7 +883,7 @@ __device__ __forceinline__ void wtl_decode_block_to_scratch(
 // publishes inv_scale = 1/mulfac for stage B.  Header is the RLE-style layout
 // [int nb][int nmf][size_t offsets[nb]][float mulfac[nmf]].
 __launch_bounds__(wbmp_opt::WBMP_OPT_THREADS)
-__global__ void waveletBitmapTwoLevelDecodeHdrKernel(
+__global__ void hipcvx_waveletBitmapTwoLevelDecodeHdrKernel(
     const unsigned char* __restrict__ input,
     unsigned char* __restrict__ scratch1_out,
     float* __restrict__ inv_scale_out)
@@ -918,7 +918,7 @@ inline hipError_t hipWaveletBitmapFused(
     hipStream_t stream = 0)
 {
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    waveletBitmapFusedKernel<<<grid, dim3(256), 0, stream>>>(
+    hipcvx_waveletBitmapFusedKernel<<<grid, dim3(256), 0, stream>>>(
         input, output, block_sizes, scale, ldimx, ldimxy,
         d_rms, d_mulfac_out);
     return hipGetLastError();

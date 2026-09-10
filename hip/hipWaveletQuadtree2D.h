@@ -249,10 +249,10 @@ wqt2d_pfor_decode(const unsigned char* in, const uint32_t* m, int* g) {
 
 // ===========================================================================
 // k1 forward: 2D DS 7/9 wavelet + quantize -> int32 32x32 grid scratch.
-// Grid/tile layout identical to waveletRLE2DFusedKernel; only the tail differs.
+// Grid/tile layout identical to hipcvx_waveletRLE2DFusedKernel; only the tail differs.
 // ===========================================================================
 __launch_bounds__(256, 2)
-__global__ void waveletQuadtree2DForwardKernel(
+__global__ void hipcvx_waveletQuadtree2DForwardKernel(
     const float* __restrict__ input,
     int* __restrict__ grid_out,
     float scale,
@@ -355,7 +355,7 @@ __global__ void waveletQuadtree2DForwardKernel(
 // significance-region length (for the self-contained header, like the octree).
 // ===========================================================================
 __launch_bounds__(WQT2D_CODE_THREADS)
-__global__ void waveletQuadtree2DCodeKernel(
+__global__ void hipcvx_waveletQuadtree2DCodeKernel(
     const int* __restrict__ grid,
     unsigned char* __restrict__ out,
     size_t* __restrict__ block_sizes,
@@ -402,8 +402,8 @@ __global__ void waveletQuadtree2DCodeKernel(
 // Compaction: copy variable-length coded blocks from the fixed-stride
 // intermediate into a tightly packed payload and write the self-contained
 // header [int nb][int nmf][size_t offsets[nb]][uint32 sig_sizes[nb]][float mf[nmf]]
-// (== hipOctreeHeaderSize).  Mirrors woctCompactKernel with the 2D slot stride.
-__global__ void wqt2dCompactKernel(
+// (== hipOctreeHeaderSize).  Mirrors hipcvx_woctCompactKernel with the 2D slot stride.
+__global__ void hipcvx_wqt2dCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
     const size_t* __restrict__ block_sizes,
@@ -450,7 +450,7 @@ __global__ void wqt2dCompactKernel(
 // inv_scale = 1/mulfac (device) for stage B.
 // ===========================================================================
 __launch_bounds__(WQT2D_CODE_THREADS)
-__global__ void waveletQuadtree2DDecodeHdrKernel(
+__global__ void hipcvx_waveletQuadtree2DDecodeHdrKernel(
     const unsigned char* __restrict__ input,
     int* __restrict__ grid_out,
     float* __restrict__ inv_scale_out)
@@ -501,11 +501,11 @@ __global__ void waveletQuadtree2DDecodeHdrKernel(
 
 // ===========================================================================
 // Decode stage B: int32 grid -> dequantize + inverse 2D DS 7/9 wavelet.
-// Transform is byte-for-byte waveletRLE2DInverseFusedKernel with the RLE decode
+// Transform is byte-for-byte hipcvx_waveletRLE2DInverseFusedKernel with the RLE decode
 // replaced by an int32-grid read scaled by inv_scale (read from device).
 // ===========================================================================
 __launch_bounds__(256, 2)
-__global__ void waveletQuadtree2DInverseKernel(
+__global__ void hipcvx_waveletQuadtree2DInverseKernel(
     const int* __restrict__ grid,
     float* __restrict__ output,
     const float* __restrict__ inv_scale_dev,

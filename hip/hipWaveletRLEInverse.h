@@ -20,7 +20,7 @@
 using wrli_float4_vec = ds79_float4_vec;
 
 __launch_bounds__(256, 2)
-__global__ void waveletRLEInverseFusedKernel(
+__global__ void hipcvx_waveletRLEInverseFusedKernel(
     const unsigned char* __restrict__ input,
     const size_t* __restrict__ block_sizes,
     const size_t* __restrict__ block_offsets,
@@ -162,7 +162,7 @@ inline hipError_t hipWaveletRLEInverseFusedFixedStride(
     int ldimx, int ldimxy)
 {
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    waveletRLEInverseFusedKernel<<<grid, dim3(256)>>>(
+    hipcvx_waveletRLEInverseFusedKernel<<<grid, dim3(256)>>>(
         compressed, block_sizes, nullptr,
         output, inv_scale, ldimx, ldimxy, 0);
     return hipGetLastError();
@@ -177,7 +177,7 @@ inline hipError_t hipWaveletRLEInverseFusedFixedStride(
 #include "hipSegmentedRLE.h"
 
 __launch_bounds__(256, 2)
-__global__ void waveletSegRLEInverseFusedKernel(
+__global__ void hipcvx_waveletSegRLEInverseFusedKernel(
     const unsigned char* __restrict__ input,
     const size_t* __restrict__ block_sizes,
     const size_t* __restrict__ block_offsets,

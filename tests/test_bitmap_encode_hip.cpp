@@ -77,7 +77,7 @@ int main(int argc, char** argv)
     HIPCHECK(hipMalloc(&d_rle_sizes, nblocks * sizeof(size_t)));
     {
         dim3 grid(nbx, nby, nbz);
-        waveletRLEFusedKernel<<<grid, dim3(256)>>>(
+        hipcvx_waveletRLEFusedKernel<<<grid, dim3(256)>>>(
             d_in, d_rle, d_rle_sizes, mulfac, ldimx, ldimxy, nullptr, nullptr);
         HIPCHECK(hipGetLastError());
     }

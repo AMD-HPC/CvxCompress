@@ -62,33 +62,33 @@ struct Ctx {
 static void launch_rle(void* p) {
     Ctx* c = (Ctx*)p;
     dim3 grid(c->nbx, c->nby, c->nbz);
-    waveletRLEFusedKernel<<<grid, dim3(256)>>>(
+    hipcvx_waveletRLEFusedKernel<<<grid, dim3(256)>>>(
         c->d_in, c->d_rle, c->d_rle_sizes, c->mulfac, c->ldimx, c->ldimxy, nullptr, nullptr);
 }
 static void launch_bmp(void* p) {
     Ctx* c = (Ctx*)p;
     dim3 grid(c->nbx, c->nby, c->nbz);
-    waveletBitmapFusedKernel<<<grid, dim3(256)>>>(
+    hipcvx_waveletBitmapFusedKernel<<<grid, dim3(256)>>>(
         c->d_in, c->d_bmp, c->d_bmp_sizes, c->mulfac, c->ldimx, c->ldimxy, nullptr, nullptr);
 }
 static void launch_code(void* p) {
     Ctx* c = (Ctx*)p;
-    waveletBitmapCodeKernel<<<c->nblocks, dim3(256)>>>(
+    hipcvx_waveletBitmapCodeKernel<<<c->nblocks, dim3(256)>>>(
         c->d_bmp, c->d_bmp_sizes, c->d_code, c->d_code_sizes);
 }
 static void launch_codepl(void* p) {
     Ctx* c = (Ctx*)p;
-    waveletBitmapCodePerLineKernel<<<c->nblocks, dim3(256)>>>(
+    hipcvx_waveletBitmapCodePerLineKernel<<<c->nblocks, dim3(256)>>>(
         c->d_bmp, c->d_bmp_sizes, c->d_codepl, c->d_codepl_sizes);
 }
 static void launch_codetl(void* p) {
     Ctx* c = (Ctx*)p;
-    waveletBitmapCodeTwoLevelKernel<<<c->nblocks, dim3(256)>>>(
+    hipcvx_waveletBitmapCodeTwoLevelKernel<<<c->nblocks, dim3(256)>>>(
         c->d_bmp, c->d_bmp_sizes, c->d_codetl, c->d_codetl_sizes);
 }
 static void launch_codetlopt(void* p) {
     Ctx* c = (Ctx*)p;
-    waveletBitmapCodeTwoLevelOptKernel<<<c->nblocks, dim3(wbmp_opt::WBMP_OPT_THREADS)>>>(
+    hipcvx_waveletBitmapCodeTwoLevelOptKernel<<<c->nblocks, dim3(wbmp_opt::WBMP_OPT_THREADS)>>>(
         c->d_bmp, c->d_bmp_sizes, c->d_codetlopt, c->d_codetlopt_sizes);
 }
 

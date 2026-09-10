@@ -193,7 +193,7 @@ static bool run_case(int NX, int NY, int NZ) {
     std::printf("  raw field RMS = %.6e\n", rms);
 
     // ---- GPU forward ZYX via the PRODUCTION fused kernel ----
-    // hipWaveletRLEFusedDumpCoef runs the exact production waveletRLEFusedKernel
+    // hipWaveletRLEFusedDumpCoef runs the exact production hipcvx_waveletRLEFusedKernel
     // (Phase 1-3 wavelet + Phase 4 quant/RLE) and additionally writes the
     // pre-quant ZYX coefficients to d_coef.  The RLE outputs are discarded.
     // The 'scale' arg is used directly as mulfac here (d_rms path unused); the

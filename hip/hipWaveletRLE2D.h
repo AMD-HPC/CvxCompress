@@ -112,7 +112,7 @@ int wrle_xline(const float* values, float scale, unsigned char* dst)
 // Grid: (ceil(nbx/32), nby) where nbx = nx/32, nby = ny/32.
 // ---------------------------------------------------------------------------
 __launch_bounds__(256, 2)
-__global__ void waveletRLE2DFusedKernel(
+__global__ void hipcvx_waveletRLE2DFusedKernel(
     const float* __restrict__ input,
     unsigned char* __restrict__ output,
     size_t* __restrict__ block_sizes,
@@ -264,7 +264,7 @@ __global__ void waveletRLE2DFusedKernel(
 // to reduce scratch spilling while keeping phase-separation benefits.
 // ---------------------------------------------------------------------------
 __launch_bounds__(256, 2)
-__global__ void waveletRLE2DInverseFusedKernel(
+__global__ void hipcvx_waveletRLE2DInverseFusedKernel(
     const unsigned char* __restrict__ input,
     const size_t* __restrict__ block_sizes,
     const size_t* __restrict__ block_offsets,
@@ -409,9 +409,9 @@ __global__ void waveletRLE2DInverseFusedKernel(
     }
 }
 
-// Output compaction for 2D blocks. Same as wrleCompactKernel but with
+// Output compaction for 2D blocks. Same as hipcvx_wrleCompactKernel but with
 // configurable slot stride.
-__global__ void wrle2DCompactKernel(
+__global__ void hipcvx_wrle2DCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
     const size_t* __restrict__ block_sizes,

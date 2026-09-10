@@ -12,7 +12,7 @@
 // The encode/decode core is a single __host__ __device__ function with an
 // explicit depth-5 stack, so the CPU reference and the GPU kernel produce
 // byte-for-byte identical streams by construction.  Both operate on the 32x32
-// z-line masks produced by waveletBitmapFusedKernel (kernel 1).
+// z-line masks produced by hipcvx_waveletBitmapFusedKernel (kernel 1).
 //
 // Coded block layout:  [1B mode][significance][2b/nonempty-line width table]
 //                      [per-line packed values]
@@ -286,7 +286,7 @@ static inline void woct_decode_lm(const unsigned char* in, int sigbytes, uint32_
 // the stream is byte-identical to the host reference (prototype: not yet a
 // parallel serializer).
 // ---------------------------------------------------------------------------
-__global__ void waveletOctreeSigEncodeKernel(
+__global__ void hipcvx_waveletOctreeSigEncodeKernel(
     const unsigned char* __restrict__ scratch1,
     unsigned char* __restrict__ out,
     size_t* __restrict__ sig_sizes)
@@ -315,7 +315,7 @@ __global__ void waveletOctreeSigEncodeKernel(
 
 // GPU kernel: decode significance -> reconstruct 1024 z-line masks in L order
 // into out_masks[bid*1024 + L] for byte-exact comparison against the bitmap.
-__global__ void waveletOctreeSigDecodeKernel(
+__global__ void hipcvx_waveletOctreeSigDecodeKernel(
     const unsigned char* __restrict__ coded,
     const size_t* __restrict__ sig_sizes,
     uint32_t* __restrict__ out_masks)
@@ -457,7 +457,7 @@ __device__ __forceinline__ void woct_build_pyramid(WoctShared& s) {
 }
 
 // Parallel level-major encode: byte-for-byte identical stream to woct_encode_lm.
-__global__ void waveletOctreeSigEncodeParKernel(
+__global__ void hipcvx_waveletOctreeSigEncodeParKernel(
     const unsigned char* __restrict__ scratch1,
     unsigned char* __restrict__ out,
     size_t* __restrict__ sig_sizes)
@@ -541,7 +541,7 @@ __global__ void waveletOctreeSigEncodeParKernel(
 
 // Parallel level-major decode: reconstruct 1024 z-line masks (L order) into
 // out_masks[bid*1024+L].
-__global__ void waveletOctreeSigDecodeParKernel(
+__global__ void hipcvx_waveletOctreeSigDecodeParKernel(
     const unsigned char* __restrict__ coded,
     const size_t* __restrict__ sig_sizes,
     uint32_t* __restrict__ out_masks)
@@ -640,7 +640,7 @@ __global__ void waveletOctreeSigDecodeParKernel(
 //
 //   [4B mode][significance][pad->4][2b/ne width table][per-line values]
 //
-// The significance region is byte-identical to waveletOctreeSigEncodeParKernel;
+// The significance region is byte-identical to hipcvx_waveletOctreeSigEncodeParKernel;
 // the width table + value payload are byte-identical to the two-level coder
 // (same nonempty-line order, per-line widths and packing).  block_sizes2[bid]
 // records the exact coded length.  Values are streamed straight to global
@@ -648,7 +648,7 @@ __global__ void waveletOctreeSigDecodeParKernel(
 // (values start at the 4-aligned end of the significance region).
 // ===========================================================================
 __launch_bounds__(1024)
-__global__ void waveletOctreeCodeParKernel(
+__global__ void hipcvx_waveletOctreeCodeParKernel(
     const unsigned char* __restrict__ scratch1,
     unsigned char* __restrict__ out,
     size_t* __restrict__ block_sizes2,
@@ -811,7 +811,7 @@ inline hipError_t hipWaveletOctreeCode(
     const unsigned char* scratch1, unsigned char* out, size_t* block_sizes2,
     size_t* sig_sizes, int nblocks, hipStream_t stream = 0)
 {
-    waveletOctreeCodeParKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(scratch1, out, block_sizes2, sig_sizes);
+    hipcvx_waveletOctreeCodeParKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(scratch1, out, block_sizes2, sig_sizes);
     return hipGetLastError();
 }
 
@@ -819,7 +819,7 @@ inline hipError_t hipWaveletOctreeCode(
 // stream the blocks are packed back-to-back, so this keeps every block start
 // (and thus its uint32 width-table / flat-mask reads) aligned.  Overhead is
 // <align bytes/block; the padding bytes are never read by the decoder.
-__global__ void woctAlignSizesKernel(size_t* __restrict__ sizes, int nb, int align)
+__global__ void hipcvx_woctAlignSizesKernel(size_t* __restrict__ sizes, int nb, int align)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < nb) sizes[i] = (sizes[i] + (align - 1)) & ~(size_t)(align - 1);
@@ -828,7 +828,7 @@ __global__ void woctAlignSizesKernel(size_t* __restrict__ sizes, int nb, int ali
 inline hipError_t waveletOctreeCodeParAlignSizes(size_t* sizes, int nb, hipStream_t stream = 0)
 {
     int threads = 256, blocks = (nb + threads - 1) / threads;
-    woctAlignSizesKernel<<<blocks, threads, 0, stream>>>(sizes, nb, 4);
+    hipcvx_woctAlignSizesKernel<<<blocks, threads, 0, stream>>>(sizes, nb, 4);
     return hipGetLastError();
 }
 
@@ -836,9 +836,9 @@ inline hipError_t waveletOctreeCodeParAlignSizes(size_t* sizes, int nb, hipStrea
 // (WOCT_CODE_SLOT_BYTES) intermediate into a tightly packed payload using the
 // exclusive-scan offsets, and writes the self-contained octree header (block
 // offsets + per-block significance sizes + mulfac).  dst points to the payload
-// region (after the header).  Mirrors wrleCompactKernel; the extra sig-size
+// region (after the header).  Mirrors hipcvx_wrleCompactKernel; the extra sig-size
 // table is what lets the decoder recover each block's significance length.
-__global__ void woctCompactKernel(
+__global__ void hipcvx_woctCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
     const size_t* __restrict__ block_sizes,
@@ -1008,7 +1008,7 @@ __device__ __forceinline__ void woct_decode_block_to_scratch(
 
 // Prototype kernel: fixed-stride coded slots + per-block sig-size array.
 __launch_bounds__(1024)
-__global__ void waveletOctreeDecodeToBitmapKernel(
+__global__ void hipcvx_waveletOctreeDecodeToBitmapKernel(
     const unsigned char* __restrict__ coded,
     const size_t* __restrict__ sig_sizes,
     unsigned char* __restrict__ scratch1_out,
@@ -1031,7 +1031,7 @@ __host__ __device__ inline int hipOctreeHeaderSize(int num_blocks, int num_mulfa
 // reconstructs the kernel-1 scratch layout, and (block 0) publishes
 // inv_scale = 1/mulfac for stage B.
 __launch_bounds__(1024)
-__global__ void waveletOctreeDecodeToBitmapHdrKernel(
+__global__ void hipcvx_waveletOctreeDecodeToBitmapHdrKernel(
     const unsigned char* __restrict__ input,
     unsigned char* __restrict__ scratch1_out,
     float* __restrict__ inv_scale_out)
@@ -1057,7 +1057,7 @@ inline hipError_t hipWaveletOctreeDecodeToBitmap(
     const unsigned char* coded, const size_t* sig_sizes,
     unsigned char* scratch1_out, size_t* block_sizes, int nblocks, hipStream_t stream = 0)
 {
-    waveletOctreeDecodeToBitmapKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(
+    hipcvx_waveletOctreeDecodeToBitmapKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(
         coded, sig_sizes, scratch1_out, block_sizes);
     return hipGetLastError();
 }
@@ -1065,9 +1065,9 @@ inline hipError_t hipWaveletOctreeDecodeToBitmap(
 // ===========================================================================
 // FULL DECODE, stage B (256 threads): kernel-1 scratch layout
 // [4096B bitmap][packed int32] -> dequantize + inverse wavelet ZYX -> wavefield.
-// The inverse transform mirrors waveletRLEInverseFusedKernel; only the front-end
+// The inverse transform mirrors hipcvx_waveletRLEInverseFusedKernel; only the front-end
 // (RLE decode) is swapped for the bitmap+value reconstruction, which reverses
-// waveletBitmapFusedKernel's Phase 4.  Requires DS79_INCLUDE_REG32.
+// hipcvx_waveletBitmapFusedKernel's Phase 4.  Requires DS79_INCLUDE_REG32.
 // ===========================================================================
 __device__ __forceinline__ void woct_bitmap_inverse_body(
     const unsigned char* __restrict__ scratch1,
@@ -1151,7 +1151,7 @@ __device__ __forceinline__ void woct_bitmap_inverse_body(
 
 // Stage B with a host-scalar inv_scale (prototype / test path).
 __launch_bounds__(256, 2)
-__global__ void waveletBitmapInverseFusedKernel(
+__global__ void hipcvx_waveletBitmapInverseFusedKernel(
     const unsigned char* __restrict__ scratch1,
     float* __restrict__ output,
     float inv_scale, int ldimx, int ldimxy)
@@ -1162,7 +1162,7 @@ __global__ void waveletBitmapInverseFusedKernel(
 // Stage B with a device inv_scale pointer (API path): reads 1/mulfac published
 // by the header-addressed decode kernel, so no host readback is needed.
 __launch_bounds__(256, 2)
-__global__ void waveletBitmapInverseFusedDevKernel(
+__global__ void hipcvx_waveletBitmapInverseFusedDevKernel(
     const unsigned char* __restrict__ scratch1,
     float* __restrict__ output,
     const float* __restrict__ inv_scale, int ldimx, int ldimxy)
@@ -1175,7 +1175,7 @@ inline hipError_t hipWaveletBitmapInverseFused(
     int nx, int ny, int nz, int ldimx, int ldimxy, hipStream_t stream=0)
 {
     dim3 grid((nx+31)/32,(ny+31)/32,(nz+31)/32);
-    waveletBitmapInverseFusedKernel<<<grid, dim3(256), 0, stream>>>(scratch1, output, inv_scale, ldimx, ldimxy);
+    hipcvx_waveletBitmapInverseFusedKernel<<<grid, dim3(256), 0, stream>>>(scratch1, output, inv_scale, ldimx, ldimxy);
     return hipGetLastError();
 }
 
@@ -1183,28 +1183,28 @@ inline hipError_t hipWaveletOctreeSigEncode(
     const unsigned char* scratch1, unsigned char* out, size_t* sig_sizes,
     int nblocks, int threads = 256, hipStream_t stream = 0)
 {
-    waveletOctreeSigEncodeKernel<<<nblocks, dim3(threads), 0, stream>>>(scratch1, out, sig_sizes);
+    hipcvx_waveletOctreeSigEncodeKernel<<<nblocks, dim3(threads), 0, stream>>>(scratch1, out, sig_sizes);
     return hipGetLastError();
 }
 inline hipError_t hipWaveletOctreeSigEncodePar(
     const unsigned char* scratch1, unsigned char* out, size_t* sig_sizes,
     int nblocks, hipStream_t stream = 0)
 {
-    waveletOctreeSigEncodeParKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(scratch1, out, sig_sizes);
+    hipcvx_waveletOctreeSigEncodeParKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(scratch1, out, sig_sizes);
     return hipGetLastError();
 }
 inline hipError_t hipWaveletOctreeSigDecodePar(
     const unsigned char* coded, const size_t* sig_sizes, uint32_t* out_masks,
     int nblocks, hipStream_t stream = 0)
 {
-    waveletOctreeSigDecodeParKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(coded, sig_sizes, out_masks);
+    hipcvx_waveletOctreeSigDecodeParKernel<<<nblocks, dim3(WOCT_PAR_THREADS), 0, stream>>>(coded, sig_sizes, out_masks);
     return hipGetLastError();
 }
 inline hipError_t hipWaveletOctreeSigDecode(
     const unsigned char* coded, const size_t* sig_sizes, uint32_t* out_masks,
     int nblocks, int threads = 256, hipStream_t stream = 0)
 {
-    waveletOctreeSigDecodeKernel<<<nblocks, dim3(threads), 0, stream>>>(coded, sig_sizes, out_masks);
+    hipcvx_waveletOctreeSigDecodeKernel<<<nblocks, dim3(threads), 0, stream>>>(coded, sig_sizes, out_masks);
     return hipGetLastError();
 }
 

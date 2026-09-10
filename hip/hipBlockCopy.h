@@ -25,7 +25,7 @@ static constexpr int BCOPY_ZPB = 8;
 // ---------------------------------------------------------------------------
 template<bool DO_COPY, bool COMPUTE_RMS>
 __launch_bounds__(256)
-__global__ void copyToWaveletKernelOpt(
+__global__ void hipcvx_copyToWaveletKernelOpt(
     const float* __restrict__ d_src,
     int ldimx, int ldimxy,
     int x0, int y0, int z0,
@@ -156,7 +156,7 @@ __global__ void copyToWaveletKernelOpt(
 // Load ZPB planes from wavelet → store extraction-window planes to grid.
 // ---------------------------------------------------------------------------
 __launch_bounds__(256)
-__global__ void copyFromWaveletKernelOpt(
+__global__ void hipcvx_copyFromWaveletKernelOpt(
     const float* __restrict__ d_src,
     int wnx, int wny, int wnz,
     float* __restrict__ d_dst,
@@ -224,7 +224,7 @@ __global__ void copyFromWaveletKernelOpt(
     }
 }
 
-__global__ void copyFromWaveletKernel(
+__global__ void hipcvx_copyFromWaveletKernel(
     const float* __restrict__ d_src,
     int wnx, int wny, int wnz,
     float* __restrict__ d_dst,
@@ -250,7 +250,7 @@ __global__ void copyFromWaveletKernel(
 
 // Reduce partial sums → RMS.  Single block, 256 threads.
 __launch_bounds__(256)
-__global__ void reducePartialSumsToRMS(
+__global__ void hipcvx_reducePartialSumsToRMS(
     const double* __restrict__ d_partial_sums,
     double* __restrict__ d_rms_out,
     int num_partials,

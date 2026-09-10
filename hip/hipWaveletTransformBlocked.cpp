@@ -104,7 +104,7 @@ void global_store_x2_nt_inc(float4_vec v0, float4_vec v1,
 // ---------------------------------------------------------------------------
 template<int Nplanes, int Batch>
 __launch_bounds__(256, 4)
-__global__ void waveletBlockedForwardKernel2DBatched(
+__global__ void hipcvx_waveletBlockedForwardKernel2DBatched(
     const float* __restrict__ input,
     float* __restrict__ output,
     int ldimx,
@@ -260,7 +260,7 @@ __global__ void waveletBlockedForwardKernel2DBatched(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBlockedForwardKernel1D_AllReg(
+__global__ void hipcvx_waveletBlockedForwardKernel1D_AllReg(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -307,7 +307,7 @@ __global__ void waveletBlockedForwardKernel1D_AllReg(
 // Thread mapping: tid/32 = plane (0..7), tid%32 = column (0..31).
 // ---------------------------------------------------------------------------
 __launch_bounds__(256, 2)
-__global__ void waveletForward3D_Y(
+__global__ void hipcvx_waveletForward3D_Y(
     const float* __restrict__ input,
     float* __restrict__ output,
     int ldimx,
@@ -379,7 +379,7 @@ hipError_t hipWaveletTransform3DBlockedForward2DImpl(
 {
     dim3 block(8, 32);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBlockedForwardKernel2DBatched<Nplanes, Batch>),
+    hipLaunchKernelGGL((hipcvx_waveletBlockedForwardKernel2DBatched<Nplanes, Batch>),
                        grid, block, 0, 0, input, output, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -393,7 +393,7 @@ hipError_t hipWaveletTransform3DBlockedAllReg(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBlockedForwardKernel1D_AllReg<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBlockedForwardKernel1D_AllReg<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -407,7 +407,7 @@ hipError_t hipWaveletTransform3DForwardY(
 {
     dim3 block(8, 32);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL(waveletForward3D_Y,
+    hipLaunchKernelGGL(hipcvx_waveletForward3D_Y,
                        grid, block, 0, 0, input, output, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -417,17 +417,17 @@ hipError_t hipWaveletTransform3DForwardY(
 // ---------------------------------------------------------------------------
 
 // 2D (8x32) batched kernel
-template __global__ void waveletBlockedForwardKernel2DBatched<4, 4>(const float* __restrict__, float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBlockedForwardKernel2DBatched<4, 4>(const float* __restrict__, float* __restrict__, int, int);
 template hipError_t hipWaveletTransform3DBlockedForward2DImpl<4, 4>(const float*, float*, int, int, int, int, int, int, int, int);
-template __global__ void waveletBlockedForwardKernel2DBatched<6, 2>(const float* __restrict__, float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBlockedForwardKernel2DBatched<6, 2>(const float* __restrict__, float* __restrict__, int, int);
 template hipError_t hipWaveletTransform3DBlockedForward2DImpl<6, 2>(const float*, float*, int, int, int, int, int, int, int, int);
-template __global__ void waveletBlockedForwardKernel2DBatched<8, 4>(const float* __restrict__, float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBlockedForwardKernel2DBatched<8, 4>(const float* __restrict__, float* __restrict__, int, int);
 template hipError_t hipWaveletTransform3DBlockedForward2DImpl<8, 4>(const float*, float*, int, int, int, int, int, int, int, int);
-template __global__ void waveletBlockedForwardKernel2DBatched<12, 4>(const float* __restrict__, float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBlockedForwardKernel2DBatched<12, 4>(const float* __restrict__, float* __restrict__, int, int);
 template hipError_t hipWaveletTransform3DBlockedForward2DImpl<12, 4>(const float*, float*, int, int, int, int, int, int, int, int);
-template __global__ void waveletBlockedForwardKernel2DBatched<16, 4>(const float* __restrict__, float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBlockedForwardKernel2DBatched<16, 4>(const float* __restrict__, float* __restrict__, int, int);
 template hipError_t hipWaveletTransform3DBlockedForward2DImpl<16, 4>(const float*, float*, int, int, int, int, int, int, int, int);
 
 // All-register kernel
-template __global__ void waveletBlockedForwardKernel1D_AllReg<256, 3>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBlockedForwardKernel1D_AllReg<256, 3>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransform3DBlockedAllReg<256, 3>(float*, int, int, int, int, int, int, int, int);

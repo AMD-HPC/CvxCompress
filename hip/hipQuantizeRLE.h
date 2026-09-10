@@ -144,7 +144,7 @@ int qrle_zline(const qrle_float4_vec* planes, int x_off, float scale,
 }
 
 __launch_bounds__(256, 2)
-__global__ void quantizeRLEKernel(
+__global__ void hipcvx_quantizeRLEKernel(
     float* __restrict__ input,
     unsigned char* __restrict__ output,
     int* __restrict__ block_sizes,
@@ -226,7 +226,7 @@ inline hipError_t hipQuantizeRLEEncode(
     int ldimx, int ldimxy)
 {
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    quantizeRLEKernel<<<grid, dim3(256)>>>(
+    hipcvx_quantizeRLEKernel<<<grid, dim3(256)>>>(
         input, output, block_sizes, scale, ldimx, ldimxy);
     return hipGetLastError();
 }

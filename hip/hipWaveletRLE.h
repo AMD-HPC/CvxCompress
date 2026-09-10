@@ -119,7 +119,7 @@ inline int hipCompressHeaderSize(int num_blocks, int num_mulfacs)
 }
 
 __launch_bounds__(256, 2)
-__global__ void waveletRLEFusedKernel(
+__global__ void hipcvx_waveletRLEFusedKernel(
     const float* __restrict__ input,
     unsigned char* __restrict__ output,
     size_t* __restrict__ block_sizes,
@@ -283,7 +283,7 @@ inline hipError_t hipWaveletRLEFused(
     int ldimx, int ldimxy)
 {
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    waveletRLEFusedKernel<<<grid, dim3(256)>>>(
+    hipcvx_waveletRLEFusedKernel<<<grid, dim3(256)>>>(
         input, output, block_sizes, scale, ldimx, ldimxy,
         nullptr, nullptr, nullptr);
     return hipGetLastError();
@@ -302,7 +302,7 @@ inline hipError_t hipWaveletRLEFusedDumpCoef(
     int ldimx, int ldimxy)
 {
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    waveletRLEFusedKernel<<<grid, dim3(256)>>>(
+    hipcvx_waveletRLEFusedKernel<<<grid, dim3(256)>>>(
         input, output, block_sizes, scale, ldimx, ldimxy,
         nullptr, nullptr, d_coef_out);
     return hipGetLastError();
@@ -317,7 +317,7 @@ inline hipError_t hipWaveletRLEFusedDumpCoef(
 // If hdr != nullptr, each block writes its offset to the header, and block 0
 // writes the header constants ({num_blocks, num_mulfacs}) and mulfacs.
 // dst points to the payload region (after header).
-__global__ void wrleCompactKernel(
+__global__ void hipcvx_wrleCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
     const size_t* __restrict__ block_sizes,
@@ -385,7 +385,7 @@ inline hipError_t hipWaveletRLEFusedCompact(
     int nblocks = (nx / 32) * (ny / 32) * (nz / 32);
 
     dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    waveletRLEFusedKernel<<<grid, dim3(256), 0, stream>>>(
+    hipcvx_waveletRLEFusedKernel<<<grid, dim3(256), 0, stream>>>(
         input, scratch, block_sizes, scale, ldimx, ldimxy,
         nullptr, nullptr, nullptr);
 
@@ -395,7 +395,7 @@ inline hipError_t hipWaveletRLEFusedCompact(
         rocprim::plus<size_t>(), stream);
     if (err != hipSuccess) return err;
 
-    wrleCompactKernel<<<nblocks, 256, 0, stream>>>(
+    hipcvx_wrleCompactKernel<<<nblocks, 256, 0, stream>>>(
         scratch, compact_out, block_sizes, offsets,
         nullptr, 0, 0, nullptr);
 
@@ -421,7 +421,7 @@ inline hipError_t hipWaveletRLECompactScanTempSize(int nblocks, size_t* scan_tem
 #include "hipSegmentedRLE.h"
 
 __launch_bounds__(256, 2)
-__global__ void waveletSegRLEFusedKernel(
+__global__ void hipcvx_waveletSegRLEFusedKernel(
     const float* __restrict__ input,
     unsigned char* __restrict__ output,
     size_t* __restrict__ block_sizes,
