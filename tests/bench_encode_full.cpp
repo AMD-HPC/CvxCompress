@@ -3,7 +3,7 @@
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 //
 // Full-encode throughput: times hipCompress + hipCompressSynchronize
-// end-to-end (fused wavelet+RLE, exclusive scan, compact, D2H readback).
+// end-to-end (wavelet transform, entropy coding, scan, compact, D2H readback).
 // RMS is computed once outside the loop so quantization is realistic.
 // Set HIP_CVX_SADDR to route the forward kernel through the saddr variant.
 

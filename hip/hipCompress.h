@@ -22,6 +22,7 @@ enum hipCompressError_t {
     HIP_COMPRESS_ERROR_INVALID_SCALE,
     HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH,
     HIP_COMPRESS_ERROR_PLANE_TOO_LARGE,
+    HIP_COMPRESS_ERROR_INVALID_CODEC,
     HIP_COMPRESS_ERROR_HIP_RUNTIME,
 };
 
@@ -30,20 +31,15 @@ hipCompressError_t hipCompressGetLastError(const hipCompressPlan* plan);
 const char* hipCompressErrorString(hipCompressError_t err);
 
 enum hipCompressKernel {
-    HIP_COMPRESS_KERNEL_ZLINE    = 0,  // parallel z-line RLE (per-block metadata)
-    HIP_COMPRESS_KERNEL_SEGRLE   = 1,  // segment-aligned RLE (no metadata overhead)
-    HIP_COMPRESS_KERNEL_OCTREE   = 2,  // octree significance coder (3D only)
-    HIP_COMPRESS_KERNEL_TWOLEVEL = 3,  // two-level occupancy+width coder (3D only).
+    HIP_COMPRESS_KERNEL_OCTREE   = 0,  // octree significance coder (3D only)
+    HIP_COMPRESS_KERNEL_TWOLEVEL = 1,  // two-level occupancy+width coder (3D only).
                                        // Encoder is arch-selected: the LDS-staged
                                        // opt kernel on gfx950, the portable kernel
                                        // on gfx942/gfx90a (byte-identical stream).
-    HIP_COMPRESS_KERNEL_QUADTREE = 4,  // quadtree significance coder (2D only) --
+    HIP_COMPRESS_KERNEL_QUADTREE = 2,  // quadtree significance coder (2D only) --
                                        // the 2D counterpart of OCTREE.
-    HIP_COMPRESS_KERNEL_AUTO     = 5,  // dimensionality-selected default: resolves
-                                       // to QUADTREE for 2D (nz == 1) and OCTREE
-                                       // for 3D at plan creation, falling back to
-                                       // ZLINE for configurations the structured
-                                       // coders cannot handle.
+    HIP_COMPRESS_KERNEL_AUTO     = 3,  // dimensionality-selected default: QUADTREE
+                                       // for 2D and OCTREE for 3D.
 };
 
 // Which stage of the encode chain aux_stream picks up from. The chain is
@@ -52,9 +48,7 @@ enum hipCompressKernel {
 //
 // where "transform" is the fused wavelet + quantize + significance pass and
 // "encode" is the entropy coder (octree/two-level/quadtree significance + PFOR
-// values). ZLINE and SEGRLE have no separate encode stage -- their transform
-// emits block sizes directly -- so FROM_ENCODE and FROM_COMPACT are the same
-// thing for those codecs.
+// values).
 //
 // Transform never moves: it is bandwidth-bound and reads the caller's live
 // input buffer, so overlapping it only steals HBM from the caller.
@@ -200,7 +194,7 @@ hipError_t hipCopyFromWaveletLayout(
     hipCompressPlan* plan,
     hipStream_t user_stream);
 
-// Wavelet transform + quantize + RLE encode → self-contained compressed stream.
+// Wavelet transform + quantize + entropy encode → self-contained stream.
 // Fully async — returns immediately after queuing all GPU work.
 // d_input must be a wavelet-layout buffer (32-divisible dims matching plan).
 //
@@ -234,7 +228,7 @@ hipError_t hipCompressSynchronize(
     long* compressed_length,
     float* compression_ratio);
 
-// RLE decode + inverse wavelet → wavelet-layout buffer.
+// Entropy decode + inverse wavelet → wavelet-layout buffer.
 // Reads the self-contained header (block offsets, mulfac) from d_input.
 // Single kernel launch on user_stream. No sync.
 hipError_t hipDecompress(

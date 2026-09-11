@@ -5,9 +5,7 @@
 #include "hipCompress.h"
 
 #define DS79_INCLUDE_REG32
-#include "hipWaveletRLE.h"
-#include "hipWaveletRLEInverse.h"
-#include "hipWaveletRLE2D.h"
+#include "hipCompact.h"
 #include "hipWaveletBitmap.h"
 #include "hipWaveletOctree.h"
 #include "hipWaveletQuadtree2D.h"
@@ -49,8 +47,6 @@ static int hipCompressDebugLevel()
 static const char* hipCompressKernelName(hipCompressKernel k)
 {
     switch (k) {
-    case HIP_COMPRESS_KERNEL_ZLINE:    return "ZLINE";
-    case HIP_COMPRESS_KERNEL_SEGRLE:   return "SEGRLE";
     case HIP_COMPRESS_KERNEL_OCTREE:   return "OCTREE";
     case HIP_COMPRESS_KERNEL_TWOLEVEL: return "TWOLEVEL";
     case HIP_COMPRESS_KERNEL_QUADTREE: return "QUADTREE";
@@ -82,6 +78,7 @@ const char* hipCompressErrorString(hipCompressError_t err)
     case HIP_COMPRESS_ERROR_INVALID_SCALE:    return "scale must be > 0 and finite";
     case HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH:     return "extraction wavelet dims must equal plan dims";
     case HIP_COMPRESS_ERROR_PLANE_TOO_LARGE:  return "single plane too large (nx * ny must be < 2^31 elements)";
+    case HIP_COMPRESS_ERROR_INVALID_CODEC:    return "codec is invalid for this plan";
     case HIP_COMPRESS_ERROR_HIP_RUNTIME:      return "internal HIP runtime error";
     default:                                  return "unknown error";
     }
@@ -117,17 +114,16 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     if ((long)nx * (long)ny > (long)INT_MAX)
         PLAN_ERROR(p, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
 
-    // Resolve the dimensionality-selected default to a concrete codec: quadtree
-    // for 2D, octree for 3D.  Dimensions are already validated as 32-multiples
-    // above (shared by every codec), so the structured coders always apply for
-    // valid dims; ZLINE remains the fallback for configurations they cannot
-    // handle, guarding future constraints so the default flip never breaks
-    // callers.  Downstream logic only ever sees the resolved concrete kernel.
+    // Resolve the dimensionality-selected default to a concrete codec.
     const hipCompressKernel requested = kernel;
     if (kernel == HIP_COMPRESS_KERNEL_AUTO) {
         kernel = is_2d ? HIP_COMPRESS_KERNEL_QUADTREE
                        : HIP_COMPRESS_KERNEL_OCTREE;
     }
+    if (kernel != HIP_COMPRESS_KERNEL_OCTREE &&
+        kernel != HIP_COMPRESS_KERNEL_TWOLEVEL &&
+        kernel != HIP_COMPRESS_KERNEL_QUADTREE)
+        PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_CODEC, hipErrorInvalidValue);
 
     p->kernel = kernel;
     p->nx = nx; p->ny = ny; p->nz = nz;
@@ -144,21 +140,15 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
             kernel == HIP_COMPRESS_KERNEL_TWOLEVEL)
             PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_DIMENSIONS, hipErrorInvalidValue);
         p->num_blocks = (nx / 32) * (ny / 32);
-        // Quadtree: d_scratch holds the per-block int32 32x32 grid (encode: k1
-        // output; decode: stage-A output).  RLE: fixed-stride RLE slots.
-        p->scratch_slot_stride = (kernel == HIP_COMPRESS_KERNEL_QUADTREE)
-                               ? (size_t)WQT2D_GRID_BYTES : (size_t)WRLE2D_SLOT_BYTES;
+        // d_scratch holds the per-block int32 32x32 grid.
+        p->scratch_slot_stride = (size_t)WQT2D_GRID_BYTES;
     } else {
         // Quadtree significance coder is 2D only.
         if (kernel == HIP_COMPRESS_KERNEL_QUADTREE)
             PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_DIMENSIONS, hipErrorInvalidValue);
         p->num_blocks = (nx / 32) * (ny / 32) * (nz / 32);
-        // Octree / two-level: d_scratch holds the kernel-1 bitmap+values layout
-        // (encode: k1 output; decode: stage-A output).  RLE: fixed-stride slots.
-        bool bitmap_split = (kernel == HIP_COMPRESS_KERNEL_OCTREE ||
-                             kernel == HIP_COMPRESS_KERNEL_TWOLEVEL);
-        p->scratch_slot_stride = bitmap_split
-                               ? (size_t)WBMP_SLOT_BYTES : 4L * WRLE_LDS_BYTES;
+        // d_scratch holds the kernel-1 bitmap+values layout.
+        p->scratch_slot_stride = (size_t)WBMP_SLOT_BYTES;
     }
 
     int nb = p->num_blocks;
@@ -193,7 +183,7 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     }
 
     p->scan_temp_bytes = 0;
-    hipError_t err = hipWaveletRLECompactScanTempSize(nb, &p->scan_temp_bytes);
+    hipError_t err = hipCompressCompactScanTempSize(nb, &p->scan_temp_bytes);
     if (err != hipSuccess) { p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME; return err; }
 
     HIPCHECK_PLAN(p, hipMalloc(&p->d_scan_temp, p->scan_temp_bytes));
@@ -286,8 +276,7 @@ hipError_t hipCompress(
     const int ldimx = nx;
     const int nb = plan->num_blocks;
     const int num_mulfacs = 1;
-    // OCTREE and QUADTREE use the self-contained header with a per-block
-    // significance-size table; the RLE / two-level paths use the compact header.
+    // OCTREE and QUADTREE carry a per-block significance-size table.
     const bool octree_hdr = (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE ||
                              plan->kernel == HIP_COMPRESS_KERNEL_QUADTREE);
     const int hdr_size = octree_hdr
@@ -309,8 +298,7 @@ hipError_t hipCompress(
     //
     // Fires once, at the boundary plan->aux_from selects: before the entropy
     // coder at FROM_ENCODE, otherwise at the trailing call below (which also
-    // covers ZLINE/SEGRLE, whose transform emits block sizes directly and which
-    // therefore have no entropy-coding stage to split at).
+    // covers the compaction boundary).
     bool bridged = false;
     auto bridge = [&]() -> hipError_t {
         if (bridged || aux == s) return hipSuccess;
@@ -328,25 +316,14 @@ hipError_t hipCompress(
     //    user_stream), then the entropy coder on `enc`.
     if (plan->is_2d) {
         int nbx = nx / 32, nby = ny / 32;
-        dim3 grid((nbx + WRLE2D_TILES_PER_WG - 1) / WRLE2D_TILES_PER_WG, nby);
-        if (plan->kernel == HIP_COMPRESS_KERNEL_QUADTREE) {
-            // k1: 2D wavelet + quantize → int32 32x32 grid in d_scratch.
-            hipcvx_waveletQuadtree2DForwardKernel<<<grid, dim3(256), 0, s>>>(
-                d_input, reinterpret_cast<int*>(plan->d_scratch),
-                scale, ldimx, nbx, d_rms, plan->d_mulfac);
-            HIPCHECK_PLAN(plan, bridge_before_encode());
-            // encode: quadtree significance + width table + packed values →
-            // coded slots.  d_block_sizes := coded length; d_octree_sig_sizes
-            // := significance length (both per block, for scan + header).
-            hipcvx_waveletQuadtree2DCodeKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, enc>>>(
-                reinterpret_cast<const int*>(plan->d_scratch), plan->d_octree_coded,
-                plan->d_block_sizes, plan->d_octree_sig_sizes);
-        } else {
-            hipcvx_waveletRLE2DFusedKernel<<<grid, dim3(256), 0, s>>>(
-                d_input, plan->d_scratch, plan->d_block_sizes,
-                scale, ldimx, nbx,
-                d_rms, plan->d_mulfac);
-        }
+        dim3 grid((nbx + WQT2D_TILES_PER_WG - 1) / WQT2D_TILES_PER_WG, nby);
+        hipcvx_waveletQuadtree2DForwardKernel<<<grid, dim3(256), 0, s>>>(
+            d_input, reinterpret_cast<int*>(plan->d_scratch),
+            scale, ldimx, nbx, d_rms, plan->d_mulfac);
+        HIPCHECK_PLAN(plan, bridge_before_encode());
+        hipcvx_waveletQuadtree2DCodeKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, enc>>>(
+            reinterpret_cast<const int*>(plan->d_scratch), plan->d_octree_coded,
+            plan->d_block_sizes, plan->d_octree_sig_sizes);
     } else {
         const int ldimxy = nx * ny;
         dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
@@ -383,16 +360,6 @@ hipError_t hipCompress(
                     plan->d_scratch, nullptr, plan->d_octree_coded, plan->d_block_sizes);
             // 4-align each coded length (uint32 occupancy/mask/width reads).
             waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, enc);
-        } else if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
-            hipcvx_waveletSegRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
-                d_input, plan->d_scratch, plan->d_block_sizes,
-                scale, ldimx, ldimxy,
-                d_rms, plan->d_mulfac);
-        } else {
-            hipcvx_waveletRLEFusedKernel<<<grid, dim3(256), 0, s>>>(
-                d_input, plan->d_scratch, plan->d_block_sizes,
-                scale, ldimx, ldimxy,
-                d_rms, plan->d_mulfac);
         }
     }
 
@@ -407,17 +374,11 @@ hipError_t hipCompress(
         rocprim::plus<size_t>(), aux));
 
     // 4. Compact + write header on aux_stream
-    if (plan->is_2d && plan->kernel == HIP_COMPRESS_KERNEL_QUADTREE) {
+    if (plan->is_2d) {
         hipcvx_wqt2dCompactKernel<<<nb, 256, 0, aux>>>(
             plan->d_octree_coded, d_output + hdr_size,
             plan->d_block_sizes, plan->d_block_offsets, plan->d_octree_sig_sizes,
             d_output, nb, num_mulfacs, plan->d_mulfac);
-    } else if (plan->is_2d) {
-        hipcvx_wrle2DCompactKernel<<<nb, 256, 0, aux>>>(
-            plan->d_scratch, d_output + hdr_size,
-            plan->d_block_sizes, plan->d_block_offsets,
-            d_output, nb, num_mulfacs, plan->d_mulfac,
-            plan->scratch_slot_stride);
     } else if (plan->kernel == HIP_COMPRESS_KERNEL_OCTREE) {
         hipcvx_woctCompactKernel<<<nb, 256, 0, aux>>>(
             plan->d_octree_coded, d_output + hdr_size,
@@ -426,11 +387,6 @@ hipError_t hipCompress(
     } else if (plan->kernel == HIP_COMPRESS_KERNEL_TWOLEVEL) {
         hipcvx_wtlCompactKernel<<<nb, 256, 0, aux>>>(
             plan->d_octree_coded, d_output + hdr_size,
-            plan->d_block_sizes, plan->d_block_offsets,
-            d_output, nb, num_mulfacs, plan->d_mulfac);
-    } else {
-        hipcvx_wrleCompactKernel<<<nb, 256, 0, aux>>>(
-            plan->d_scratch, d_output + hdr_size,
             plan->d_block_sizes, plan->d_block_offsets,
             d_output, nb, num_mulfacs, plan->d_mulfac);
     }
@@ -642,22 +598,13 @@ hipError_t hipDecompress(
 
     if (plan->is_2d) {
         int nbx = nx / 32, nby = ny / 32;
-        dim3 grid((nbx + WRLE2D_TILES_PER_WG - 1) / WRLE2D_TILES_PER_WG, nby);
-        if (plan->kernel == HIP_COMPRESS_KERNEL_QUADTREE) {
-            const int nb = plan->num_blocks;
-            // stage A: compacted quadtree stream → int32 32x32 grid scratch;
-            // also publishes inv_scale = 1/mulfac (device) for stage B.
-            hipcvx_waveletQuadtree2DDecodeHdrKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, user_stream>>>(
-                d_input, reinterpret_cast<int*>(plan->d_scratch), plan->d_inv_scale);
-            // stage B: dequantize + inverse 2D wavelet → wavefield.
-            hipcvx_waveletQuadtree2DInverseKernel<<<grid, dim3(256), 0, user_stream>>>(
-                reinterpret_cast<const int*>(plan->d_scratch), d_output,
-                plan->d_inv_scale, ldimx, nbx);
-        } else {
-            hipcvx_waveletRLE2DInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
-                d_input, nullptr, nullptr,
-                d_output, 0.0f, ldimx, nbx, 1);
-        }
+        dim3 grid((nbx + WQT2D_TILES_PER_WG - 1) / WQT2D_TILES_PER_WG, nby);
+        const int nb = plan->num_blocks;
+        hipcvx_waveletQuadtree2DDecodeHdrKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, user_stream>>>(
+            d_input, reinterpret_cast<int*>(plan->d_scratch), plan->d_inv_scale);
+        hipcvx_waveletQuadtree2DInverseKernel<<<grid, dim3(256), 0, user_stream>>>(
+            reinterpret_cast<const int*>(plan->d_scratch), d_output,
+            plan->d_inv_scale, ldimx, nbx);
     } else {
         const int ldimxy = nx * ny;
         dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
@@ -679,14 +626,6 @@ hipError_t hipDecompress(
             // stage B: dequantize + inverse wavelet ZYX → wavefield.
             hipcvx_waveletBitmapInverseFusedDevKernel<<<grid, dim3(256), 0, user_stream>>>(
                 plan->d_scratch, d_output, plan->d_inv_scale, ldimx, ldimxy);
-        } else if (plan->kernel == HIP_COMPRESS_KERNEL_SEGRLE) {
-            hipcvx_waveletSegRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
-                d_input, nullptr, nullptr,
-                d_output, 0.0f, ldimx, ldimxy, 1);
-        } else {
-            hipcvx_waveletRLEInverseFusedKernel<<<grid, dim3(256), 0, user_stream>>>(
-                d_input, nullptr, nullptr,
-                d_output, 0.0f, ldimx, ldimxy, 1);
         }
     }
 
@@ -726,13 +665,10 @@ hipError_t hipCompressMaxOutputSize(const hipCompressPlan* plan, size_t* size)
         int hdr_size = hipOctreeHeaderSize(plan->num_blocks, 1);
         raw = (size_t)hdr_size + (size_t)plan->num_blocks * WQT2D_CODE_SLOT_BYTES;
     } else if (plan->kernel == HIP_COMPRESS_KERNEL_TWOLEVEL) {
-        // Worst case: RLE-style header + every block at the two-level slot bound
+        // Worst case: compact header + every block at the two-level slot bound
         // (larger than the WBMP_SLOT_BYTES scratch stride by the occupancy mask).
         int hdr_size = hipCompressHeaderSize(plan->num_blocks, 1);
         raw = (size_t)hdr_size + (size_t)plan->num_blocks * WBMP_TL_SLOT_BYTES;
-    } else {
-        int hdr_size = hipCompressHeaderSize(plan->num_blocks, 1);
-        raw = (size_t)hdr_size + (size_t)plan->num_blocks * plan->scratch_slot_stride;
     }
     // Include the 8B round-up slack applied to compressed_length so a buffer
     // sized from this value can always hold the padded stream.

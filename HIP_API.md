@@ -10,8 +10,8 @@ GPU-accelerated lossy compression for 2D and 3D floating-point volumes on AMD
 Instinct GPUs (MI200, MI300, MI355). Targets seismic imaging workloads where
 wavefield snapshots must be stored and retrieved at GPU memory bandwidth.
 
-Single fused kernel: wavelet transform (DS 7/9) → quantization → significance/RLE
-coding. The coder is selectable per plan (see Kernel Variants); the default
+The pipeline applies the DS 7/9 wavelet transform, quantizes the coefficients,
+and codes their significance and values. The coder is selectable per plan; the default
 resolves to octree for 3D and quadtree for 2D.
 Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 
@@ -191,9 +191,7 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
 
 | Variant | Enum | Dims | Description |
 |---------|------|------|-------------|
-| Auto      | `HIP_COMPRESS_KERNEL_AUTO`     | 2D/3D | **Default.** Dimensionality-selected: resolves to quadtree for 2D (`nz == 1`) and octree for 3D at plan creation, falling back to z-line for configurations the structured coders cannot handle |
-| Z-line    | `HIP_COMPRESS_KERNEL_ZLINE`    | 2D/3D | Parallel z-line RLE with per-block metadata. Highest encode throughput; the throughput hedge for encode-bound paths (e.g. per-timestep RTM checkpoint spilling) |
-| Seg-RLE   | `HIP_COMPRESS_KERNEL_SEGRLE`   | 3D    | Segment-aligned RLE, no metadata overhead (unoptimized) |
+| Auto      | `HIP_COMPRESS_KERNEL_AUTO`     | 2D/3D | **Default.** Resolves to quadtree for 2D (`nz == 1`) and octree for 3D |
 | Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding. Best compression ratio and fastest decode; recommended for storage/archival |
 | Quadtree  | `HIP_COMPRESS_KERNEL_QUADTREE` | 2D    | Quadtree significance coder with per-block PFOR value coding -- the 2D counterpart of octree |
 | Two-level | `HIP_COMPRESS_KERNEL_TWOLEVEL` | 3D    | Two-level occupancy + per-line width coder. Higher encode throughput than octree at a lower ratio; a hedge for compute/bandwidth-bound, rewrite-heavy paths |
@@ -209,8 +207,8 @@ hipCompressCreatePlan(&plan_def, nx, ny, nz, aux);
 // storage-oriented volume → octree (best ratio) — explicit form of the 3D default
 hipCompressCreatePlan(&plan_oct, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_OCTREE);
 
-// encode-bound / high-rate path → z-line (fastest encode)
-hipCompressCreatePlan(&plan_zl,  nx, ny, nz, aux, HIP_COMPRESS_KERNEL_ZLINE);
+// alternative 3D codec
+hipCompressCreatePlan(&plan_tl, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_TWOLEVEL);
 ```
 
 The codec is bound to the plan (internal buffer sizes and stream header layout
@@ -220,18 +218,11 @@ only, quadtree is 2D only — requesting one for the wrong dimensionality fails
 plan creation with `HIP_COMPRESS_ERROR_INVALID_DIMENSIONS`. `AUTO` avoids this
 by resolving to the dimensionality-appropriate coder at plan creation.
 
-**Choosing a codec.** The `AUTO` default maximizes compression ratio and decode
-throughput and is the right choice for storage/archival and read-heavy paths.
-For **encode-bound** paths that compress on a hot loop — e.g. per-timestep RTM
-checkpoint spilling — prefer `ZLINE`, which has the highest encode throughput.
-The octree/quadtree encode cost over z-line is small at production grid sizes
-(~1–3% at 512³) but grows at small grids where the per-block histogram, scans,
-and PFOR bookkeeping are not amortized.
+**Choosing a codec.** Use `AUTO` unless measurements on your workload favor
+the two-level 3D codec.
 
 **Memory footprint.** Octree/quadtree allocate a larger per-block scratch stride
-(`WOCT_CODE_SLOT_BYTES` ~140 KB/block plus the bitmap scratch) than z-line;
-these are global HBM buffers (not LDS). Negligible on MI300X/MI355X but worth
-noting for very large volumes.
+than two-level. These are global HBM buffers, not LDS.
 
 #### Two-level: architecture-selected encoder
 
@@ -269,8 +260,7 @@ transform  ->  encode  ->  scan  ->  compact  ->  D2H readback
 ```
 
 where *transform* is the fused wavelet + quantize + significance pass and
-*encode* is the entropy coder. ZLINE and SEGRLE have no separate encode stage —
-their transform emits block sizes directly.
+*encode* is the entropy coder.
 
 - **`user_stream`**: passed to each API call. The transform always runs here; it
   is bandwidth-bound and reads the caller's live input buffer, so moving it off
@@ -327,18 +317,16 @@ if (err != hipSuccess) {
 hip/
   hipCompress.h                  Public API header
   hipCompress.cpp                API implementation
+  hipCompact.h                   Compact stream header and scan helpers
   hipBlockCopy.h                 CopyTo / CopyFrom kernels
-  hipWaveletRLE.h                Fused forward wavelet + RLE kernels
-  hipWaveletRLEInverse.h         Fused inverse RLE + wavelet kernels
-  hipRLEDecode.h                 Z-line RLE decoder
-  hipSegmentedRLE.h              Segment-aligned RLE encode/decode
   hipWaveletBitmap.h             Bitmap significance split + two-level coder/decoder
   hipWaveletOctree.h             Octree significance coder + shared inverse stage
+  hipWaveletQuadtree2D.h         Quadtree coder and 2D transform
   ds79.h                         DS 7/9 wavelet filter coefficients and transforms
   ds79_reg32.inc                 Unrolled forward wavelet (32-point)
   us79_reg32.inc                 Unrolled inverse wavelet (32-point)
 tests/
-  test_compress_api_hip.cpp      API test suite (39 tests + benchmarks)
+  test_compress_api_hip.cpp      API test suite and benchmarks
   example_async_pipeline.cpp     Async overlap example
 ```
 

@@ -5,7 +5,7 @@
 // Async / aux-stream behaviour of hipCompress on 3D data.
 //
 // hipCompress splits its pipeline across two streams: k1 (fused wavelet +
-// quantize + bitmap/RLE) stays on user_stream because it reads the caller's
+// quantize + significance) stays on user_stream because it reads the caller's
 // live input, and everything downstream -- entropy coding, the size scan,
 // compaction, D2H readback -- runs on plan->aux_stream via an internal event
 // bridge. Nothing tested that split. test_compress_api_hip passes an aux stream
@@ -103,8 +103,6 @@ __global__ void stencilKernel(float* out, const float* in, int nx, int ny, int n
 
 struct Codec { hipCompressKernel k; const char* name; };
 static const Codec CODECS[] = {
-    { HIP_COMPRESS_KERNEL_ZLINE,    "zline"    },
-    { HIP_COMPRESS_KERNEL_SEGRLE,   "segrle"   },
     { HIP_COMPRESS_KERNEL_OCTREE,   "octree"   },
     { HIP_COMPRESS_KERNEL_TWOLEVEL, "twolevel" },
 };

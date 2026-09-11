@@ -17,9 +17,8 @@
 //   decode:  stage A     (coded stream -> int32 grid scratch; publishes inv_scale)
 //            stage B     (grid -> dequantize + inverse 2D wavelet -> volume)
 //
-// The forward/inverse transform kernels are byte-for-byte the 2D DS 7/9 transform
-// of hipWaveletRLE2D.h with the RLE tail replaced by an int32-grid read/write, so
-// the reconstructed field matches the RLE 2D path bit-for-bit at equal scale.
+// The forward and inverse kernels apply the 2D DS 7/9 transform around an
+// int32-grid coding stage.
 
 #ifndef HIPWAVELET_QUADTREE_2D_H
 #define HIPWAVELET_QUADTREE_2D_H
@@ -28,7 +27,7 @@
 #include "ds79.h"
 #include "hipPlaneIO.h"
 
-// Tile batching (identical to hipWaveletRLE2D.h so the transform is unchanged).
+// Tile batching for the 2D transform.
 static constexpr int WQT2D_TILES_PER_WG = 32;
 static constexpr int WQT2D_BATCH        = 8;
 
@@ -249,7 +248,7 @@ wqt2d_pfor_decode(const unsigned char* in, const uint32_t* m, int* g) {
 
 // ===========================================================================
 // k1 forward: 2D DS 7/9 wavelet + quantize -> int32 32x32 grid scratch.
-// Grid/tile layout identical to hipcvx_waveletRLE2DFusedKernel; only the tail differs.
+// Transform and write one int32 coefficient grid per block.
 // ===========================================================================
 __launch_bounds__(256, 2)
 __global__ void hipcvx_waveletQuadtree2DForwardKernel(
@@ -501,8 +500,6 @@ __global__ void hipcvx_waveletQuadtree2DDecodeHdrKernel(
 
 // ===========================================================================
 // Decode stage B: int32 grid -> dequantize + inverse 2D DS 7/9 wavelet.
-// Transform is byte-for-byte hipcvx_waveletRLE2DInverseFusedKernel with the RLE decode
-// replaced by an int32-grid read scaled by inv_scale (read from device).
 // ===========================================================================
 __launch_bounds__(256, 2)
 __global__ void hipcvx_waveletQuadtree2DInverseKernel(

@@ -89,7 +89,7 @@ bool test_gpu_reg32() {
 }
 
 // ---- Test 3: Full 3D ZYX kernel round-trip ----
-// Forward ZYX kernel: same structure as hipcvx_waveletRLEFusedKernel but writes back to global.
+// Forward ZYX kernel used to generate inverse-transform input.
 // Uses buffer load, Z-transform (regs), Y+X-transform (LDS), then stores back.
 
 __launch_bounds__(256, 2)

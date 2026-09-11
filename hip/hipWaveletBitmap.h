@@ -17,14 +17,15 @@
 //   kernel 2 (coding, separate): consumes bitmap + packed values and emits
 //     the final coded stream (fixed-width / width-class / bit-plane).
 //
-// Phases 1-3 (load, Z-transform, Y+X transform) are identical to
-// hipcvx_waveletRLEFusedKernel in hipWaveletRLE.h, so the quantized nonzero set and
-// values are bit-for-bit identical to the RLE path (used for validation).
+// Phases 1-3 load the field, apply the Z/Y/X transform, and quantize it before
+// building the significance bitmap and packed-value stream.
 
 #include <hip/hip_runtime.h>
 #include <rocprim/block/block_scan.hpp>
 #include "ds79.h"
-#include "hipWaveletRLE.h"   // wrle_float4_vec, WRLE_LDS_BYTES, ds79 helpers
+#include "hipPlaneIO.h"
+
+using hipcvx_wavelet_float4 = ds79_float4_vec;
 
 // One significance word (32 bits, one per z) per z-line; 4*256 z-lines/block.
 static constexpr int  WBMP_BITMAP_WORDS = 1024;
@@ -78,10 +79,10 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
     size_t byte_off = ((size_t)gy * ldimx + gx) * sizeof(float);
 
     // ---- Phase 1: Load 32 planes from global ----
-    wrle_float4_vec regs[PLANES];
+    hipcvx_wavelet_float4 regs[PLANES];
     #pragma unroll
     for (int p = 0; p < PLANES; p++)
-        regs[p] = hipPlaneLoadNT<wrle_float4_vec>(
+        regs[p] = hipPlaneLoadNT<hipcvx_wavelet_float4>(
             block_base + (size_t)p * ldimxy, byte_off);
 
     // ---- Phase 2: Z-transform in registers ----
@@ -90,7 +91,7 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
     // ---- Phase 3: Y+X transform in LDS (batches of 8) ----
     for (int pb = 0; pb < PLANES; pb += BATCH) {
         for (int dp = 0; dp < BATCH; dp++) {
-            wrle_float4_vec v = regs[pb + dp];
+            hipcvx_wavelet_float4 v = regs[pb + dp];
             int x0 = xg * 4;
             lds.wavelet[dp * 1024 + (x0+0) * 32 + (yr ^ (x0+0))] = v[0];
             lds.wavelet[dp * 1024 + (x0+1) * 32 + (yr ^ (x0+1))] = v[1];
@@ -118,7 +119,7 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
         __syncthreads();
 
         for (int dp = 0; dp < BATCH; dp++) {
-            wrle_float4_vec v;
+            hipcvx_wavelet_float4 v;
             int x0 = xg * 4;
             v[0] = lds.wavelet[dp * 1024 + (x0+0) * 32 + (yr ^ (x0+0))];
             v[1] = lds.wavelet[dp * 1024 + (x0+1) * 32 + (yr ^ (x0+1))];
@@ -775,11 +776,11 @@ inline hipError_t hipWaveletBitmapCodeTwoLevelOpt(
 // Compaction for the two-level coder: copies each variable-length coded block
 // from the fixed-stride (WBMP_TL_SLOT_BYTES) intermediate into a tightly packed
 // payload using the exclusive-scan offsets, and writes the self-contained
-// RLE-style header (block offsets + mulfac).  The two-level format is fully
+// compact header (block offsets + mulfac). The two-level format is fully
 // self-describing -- popcount(occupancy) recovers every region base -- so unlike
 // the octree stream it needs no per-block significance-size table; the header is
-// exactly hipCompressHeaderSize(nb, nmf).  dst points to the payload (after the
-// header).  Mirrors hipcvx_woctCompactKernel / hipcvx_wrleCompactKernel.
+// exactly hipCompressHeaderSize(nb, nmf). dst points to the payload after the
+// header.
 __global__ void hipcvx_wtlCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
@@ -880,7 +881,7 @@ __device__ __forceinline__ void wtl_decode_block_to_scratch(
 
 // API decode kernel: locates each block in the compacted stream via the header
 // offset table, reconstructs the kernel-1 scratch layout, and (block 0)
-// publishes inv_scale = 1/mulfac for stage B.  Header is the RLE-style layout
+// publishes inv_scale = 1/mulfac for stage B. Header is the compact layout
 // [int nb][int nmf][size_t offsets[nb]][float mulfac[nmf]].
 __launch_bounds__(wbmp_opt::WBMP_OPT_THREADS)
 __global__ void hipcvx_waveletBitmapTwoLevelDecodeHdrKernel(
@@ -904,7 +905,7 @@ __global__ void hipcvx_waveletBitmapTwoLevelDecodeHdrKernel(
         scratch1_out + (long)bid * WBMP_SLOT_BYTES);
 }
 
-// Launch helper mirroring hipWaveletRLEFused.  output must have
+// Launch helper for the fused transform and bitmap pass. output must have
 // nblocks * WBMP_SLOT_BYTES bytes; block_sizes has nblocks entries.
 inline hipError_t hipWaveletBitmapFused(
     const float* input,

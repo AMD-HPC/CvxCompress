@@ -835,9 +835,9 @@ inline hipError_t waveletOctreeCodeParAlignSizes(size_t* sizes, int nb, hipStrea
 // Compaction: copies the variable-length coded blocks from the fixed-stride
 // (WOCT_CODE_SLOT_BYTES) intermediate into a tightly packed payload using the
 // exclusive-scan offsets, and writes the self-contained octree header (block
-// offsets + per-block significance sizes + mulfac).  dst points to the payload
-// region (after the header).  Mirrors hipcvx_wrleCompactKernel; the extra sig-size
-// table is what lets the decoder recover each block's significance length.
+// offsets + per-block significance sizes + mulfac). dst points to the payload
+// region after the header. The significance-size table lets the decoder recover
+// each block's significance length.
 __global__ void hipcvx_woctCompactKernel(
     const unsigned char* __restrict__ src,
     unsigned char* __restrict__ dst,
@@ -1065,9 +1065,8 @@ inline hipError_t hipWaveletOctreeDecodeToBitmap(
 // ===========================================================================
 // FULL DECODE, stage B (256 threads): kernel-1 scratch layout
 // [4096B bitmap][packed int32] -> dequantize + inverse wavelet ZYX -> wavefield.
-// The inverse transform mirrors hipcvx_waveletRLEInverseFusedKernel; only the front-end
-// (RLE decode) is swapped for the bitmap+value reconstruction, which reverses
-// hipcvx_waveletBitmapFusedKernel's Phase 4.  Requires DS79_INCLUDE_REG32.
+// The bitmap and value reconstruction reverses
+// hipcvx_waveletBitmapFusedKernel's Phase 4. Requires DS79_INCLUDE_REG32.
 // ===========================================================================
 __device__ __forceinline__ void woct_bitmap_inverse_body(
     const unsigned char* __restrict__ scratch1,
