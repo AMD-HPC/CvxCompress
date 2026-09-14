@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
+// Use of this source code is governed by an MIT-style license that can be
+// found in the LICENSE file or at https://opensource.org/licenses/MIT.
+
 // 2D compression round-trip test.
 // Tests hipCompress API with nz=1 (2D mode):
 //   1. Plan lifecycle with nz=1
@@ -331,6 +335,66 @@ static bool test_round_trip_with_copy_2d()
     return pass;
 }
 
+// 2D quadtree significance coder round-trip correctness.
+static bool test_quadtree_2d_round_trip()
+{
+    printf("Test 6: 2D quadtree codec round-trip\n");
+    const int NX = 256, NY = 256, total = NX * NY;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* p_qt  = nullptr;
+    hipError_t err = hipCompressCreatePlan(&p_qt, NX, NY, 1, 0, HIP_COMPRESS_KERNEL_QUADTREE);
+    if (err != hipSuccess || !p_qt) {
+        printf("  FAIL: create quadtree plan: %s\n", hipGetErrorString(err));
+        return false;
+    }
+
+    // Quadtree must be rejected for 3D dims.
+    hipCompressPlan* p_bad = nullptr;
+    if (hipCompressCreatePlan(&p_bad, 64, 64, 64, 0, HIP_COMPRESS_KERNEL_QUADTREE) == hipSuccess) {
+        printf("  FAIL: quadtree accepted for 3D\n");
+        hipCompressDestroyPlan(p_bad);
+        return false;
+    }
+    printf("  reject quadtree for 3D: PASS\n");
+
+    float* d_input = nullptr;
+    float* d_out_qt = nullptr;
+    unsigned char* d_comp_qt = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out_qt, total * sizeof(float)));
+    size_t comp_qt = 0;
+    HIPCHECK(hipCompressMaxOutputSize(p_qt, &comp_qt));
+    HIPCHECK(hipMalloc(&d_comp_qt, comp_qt));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSin2DKernel<<<blocks, threads>>>(d_input, NX, NY, 24.0f, 24.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len_qt = 0;
+    float cr_qt = 0;
+    HIPCHECK(compressWithAutoRMS2D(scale, d_input, d_comp_qt,  &len_qt,  &cr_qt,  p_qt));
+    printf("  quadtree : CR=%.2f, %ld bytes\n", cr_qt, len_qt);
+
+    HIPCHECK(hipDecompress(d_comp_qt,  d_out_qt,  p_qt,  0));
+    HIPCHECK(hipDeviceSynchronize());
+
+    std::vector<float> h_in(total), h_qt(total);
+    HIPCHECK(hipMemcpy(h_in.data(),  d_input,   total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_qt.data(),  d_out_qt,  total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float qt_err = maxAbsError(h_in.data(), h_qt.data(), total);
+    printf("  quadtree vs input: max_err=%.6e (rms=%.6e, rel=%.6e)\n", qt_err, rms, qt_err / rms);
+    bool pass = (qt_err < rms) && (cr_qt > 1.0f);
+    printf("  quadtree 2D: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_out_qt);
+    hipFree(d_comp_qt);
+    hipCompressDestroyPlan(p_qt);
+    return pass;
+}
+
 int main()
 {
     printf("=== 2D Compression Tests ===\n\n");
@@ -347,6 +411,8 @@ int main()
     total++; if (test_copy_to_from_2d()) passed++;
     printf("\n");
     total++; if (test_round_trip_with_copy_2d()) passed++;
+    printf("\n");
+    total++; if (test_quadtree_2d_round_trip()) passed++;
     printf("\n");
 
     printf("=== Results: %d/%d passed ===\n", passed, total);

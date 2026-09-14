@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -89,7 +89,7 @@ bool test_gpu_reg32() {
 }
 
 // ---- Test 3: Full 3D ZYX kernel round-trip ----
-// Forward ZYX kernel: same structure as waveletRLEFusedKernel but writes back to global.
+// Forward ZYX kernel used to generate inverse-transform input.
 // Uses buffer load, Z-transform (regs), Y+X-transform (LDS), then stores back.
 
 __launch_bounds__(256, 2)

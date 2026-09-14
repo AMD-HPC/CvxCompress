@@ -6,11 +6,13 @@
 > format. Compression ratios differ from the CPU reference due to different
 > block tiling strategies.
 
-GPU-accelerated lossy compression for 3D floating-point volumes on AMD Instinct
-GPUs (MI200, MI300). Targets seismic imaging workloads where wavefield snapshots
-must be stored and retrieved at GPU memory bandwidth.
+GPU-accelerated lossy compression for 2D and 3D floating-point volumes on AMD
+Instinct GPUs (MI200, MI300, MI355). Targets seismic imaging workloads where
+wavefield snapshots must be stored and retrieved at GPU memory bandwidth.
 
-Single fused kernel: wavelet transform (DS 7/9) → quantization → RLE encoding.
+The pipeline applies the DS 7/9 wavelet transform, quantizes the coefficients,
+and codes their significance and values. The coder is selectable per plan; the default
+resolves to octree for 3D and quadtree for 2D.
 Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 
 ### Performance (MI300X vs 128-core EPYC 9554, AVX, best thread count)
@@ -21,20 +23,20 @@ Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 | 512^3 (512 MB)  | 0.72 | 14.6 | 128 | 20x |
 | 1024^3 (4 GB)   | 5.4  | 76.2 | 64  | 14x |
 
-The GPU advantage is larger in production because compression runs concurrently
-with simulation on a separate stream, so the effective cost is near-zero overlap
-time rather than end-to-end latency.
+The API can move the scan, compaction, and readback tail to a separate stream.
+The best stream placement depends on the caller's GPU workload. Profile the
+integrated pipeline instead of assuming overlap will hide compression.
 
 ## Requirements
 
-- ROCm 7.x (`module load rocm/7.2.0`)
-- AMD GPU: gfx90a (MI200) or gfx942 (MI300X)
+- ROCm 7.x (`module load rocm/7.2.1`)
+- AMD GPU: gfx90a (MI200), gfx942 (MI300X), or gfx950 (MI355X)
 - C++17, `hipcc`, `rocprim`
 
 ## Building
 
 ```bash
-module load rocm/7.2.0
+module load rocm/7.2.1
 
 # Build the CPU reference library (needed by tests)
 make libcvxcompress.so
@@ -71,9 +73,9 @@ All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
 
 | Function | Description |
 |----------|-------------|
-| `hipCompress` | Wavelet + quantize + RLE encode → self-contained compressed stream (async) |
+| `hipCompress` | Wavelet + quantize + encode (per-plan codec) → self-contained compressed stream (async) |
 | `hipCompressSynchronize` | Block until compress completes, retrieve compressed length and CR |
-| `hipDecompress` | RLE decode + inverse wavelet → wavelet buffer (single kernel, async) |
+| `hipDecompress` | Decode (per-plan codec) + inverse wavelet → wavelet buffer (single kernel, async) |
 
 ### Utilities
 
@@ -187,22 +189,72 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
 
 ### Kernel Variants
 
-| Variant | Enum | Description |
-|---------|------|-------------|
-| Z-line  | `HIP_COMPRESS_KERNEL_ZLINE` | Parallel z-line RLE with per-block metadata (default) |
-| Seg-RLE | `HIP_COMPRESS_KERNEL_SEGRLE` | Segment-aligned RLE, no metadata overhead (unoptimized) |
+| Variant | Enum | Dims | Description |
+|---------|------|------|-------------|
+| Auto      | `HIP_COMPRESS_KERNEL_AUTO`     | 2D/3D | **Default.** Resolves to quadtree for 2D (`nz == 1`) and octree for 3D |
+| Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding. Best compression ratio and fastest decode; recommended for storage/archival |
+| Quadtree  | `HIP_COMPRESS_KERNEL_QUADTREE` | 2D    | Quadtree significance coder with per-block PFOR value coding -- the 2D counterpart of octree |
 
-Select at plan creation: `hipCompressCreatePlan(&plan, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_SEGRLE)`.
+The codec is selected **at runtime, per plan** via the last argument of
+`hipCompressCreatePlan` — it is an ordinary function parameter, so switching
+between codecs requires **no recompilation** of the library or the application:
+
+```cpp
+// default (kernel arg omitted) → auto: octree for 3D, quadtree for 2D
+hipCompressCreatePlan(&plan_def, nx, ny, nz, aux);
+
+// storage-oriented volume → octree (best ratio) — explicit form of the 3D default
+hipCompressCreatePlan(&plan_oct, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_OCTREE);
+
+```
+
+The codec is bound to the plan (internal buffer sizes and stream header layout
+differ per codec), so the switching granularity is "which plan you create"; an
+existing plan's codec cannot be changed in place. Octree is 3D only and
+quadtree is 2D only. Requesting one for the wrong dimensionality fails
+plan creation with `HIP_COMPRESS_ERROR_INVALID_DIMENSIONS`. `AUTO` avoids this
+by resolving to the dimensionality-appropriate coder at plan creation.
+
+**Choosing a codec.** Use `AUTO` unless you need to pin the dimensionality-specific
+codec explicitly.
 
 ### Two-Stream Model
 
-- **`user_stream`**: passed to each API call. Wavelet transform and RLE encoding
-  run here. The stream is free immediately after `hipCompress` returns.
-- **`aux_stream`**: owned by the user, passed at plan creation. Compaction, header
-  writing, and D2H readback run here. Shared across plans.
+The encode chain is
 
-An internal event bridges the two streams. This design lets simulation kernels
-continue on `user_stream` while compression finishes on `aux_stream`.
+```
+transform  ->  encode  ->  scan  ->  compact  ->  D2H readback
+```
+
+where *transform* is the fused wavelet + quantize + significance pass and
+*encode* is the entropy coder.
+
+- **`user_stream`**: passed to each API call. The transform always runs here; it
+  is bandwidth-bound and reads the caller's live input buffer, so moving it off
+  `user_stream` only steals HBM from the caller. The stream is free as soon as
+  the stages that stayed on it have been enqueued.
+- **`aux_stream`**: owned by the user, passed at plan creation. Shared across
+  plans. Which stages it picks up is set by the `aux_from` argument to
+  `hipCompressCreatePlan`:
+
+| `hipCompressAuxStage` | Runs on `aux_stream` |
+|---|---|
+| `HIP_COMPRESS_AUX_NONE` | nothing — the whole chain is serial on `user_stream` |
+| `HIP_COMPRESS_AUX_FROM_COMPACT` | scan, compaction, header write, D2H readback (**default**) |
+| `HIP_COMPRESS_AUX_FROM_ENCODE` | the entropy coder and its size-alignment pass, plus all of the above |
+
+An internal event bridges the two streams at whichever boundary `aux_from`
+selects. This lets simulation kernels continue on `user_stream` while the tail
+of compression finishes on `aux_stream`.
+
+`aux_from` is a **placement** knob, not a correctness one: all three settings
+produce byte-identical output. It is also not a free win. Measured against a
+wave propagation kernel that already saturates the GPU (512³ TTI, snapshot every
+7 steps, MI355X), `FROM_ENCODE` runs 3–4% *slower* than `NONE` — the entropy
+coder is a throughput kernel with no idle slack to reclaim, so co-residency costs
+more than the hiding saves. Profile your own caller before moving off the
+default. Passing the same stream as both `aux_stream` and `user_stream` makes the
+split a no-op regardless of `aux_from`.
 
 ## Error Handling
 
@@ -232,20 +284,20 @@ if (err != hipSuccess) {
 hip/
   hipCompress.h                  Public API header
   hipCompress.cpp                API implementation
+  hipCompact.h                   Compact stream header and scan helpers
   hipBlockCopy.h                 CopyTo / CopyFrom kernels
-  hipWaveletRLE.h                Fused forward wavelet + RLE kernels
-  hipWaveletRLEInverse.h         Fused inverse RLE + wavelet kernels
-  hipRLEDecode.h                 Z-line RLE decoder
-  hipSegmentedRLE.h              Segment-aligned RLE encode/decode
+  hipWaveletBitmap.h             Bitmap significance split and inverse transform
+  hipWaveletOctree.h             Octree significance coder + shared inverse stage
+  hipWaveletQuadtree2D.h         Quadtree coder and 2D transform
   ds79.h                         DS 7/9 wavelet filter coefficients and transforms
   ds79_reg32.inc                 Unrolled forward wavelet (32-point)
   us79_reg32.inc                 Unrolled inverse wavelet (32-point)
 tests/
-  test_compress_api_hip.cpp      API test suite (37 tests + benchmarks)
+  test_compress_api_hip.cpp      API test suite and benchmarks
   example_async_pipeline.cpp     Async overlap example
 ```
 
 ## License
 
-Copyright (C) 2025 Advanced Micro Devices, Inc. Licensed under the
+Copyright (C) 2026 Advanced Micro Devices, Inc. Licensed under the
 [MIT License](https://opensource.org/licenses/MIT).
