@@ -37,14 +37,13 @@ static constexpr long WBMP_SLOT_BYTES     = WBMP_BITMAP_BYTES + WBMP_MAX_VAL_BYT
 __host__ __device__ __forceinline__ int hipcvx_quantize_i32(float value)
 {
 #if defined(__HIP_DEVICE_COMPILE__)
-    if (__builtin_isnan(value)) return 0;
     // Clamp with one V_MED3_F32 before the conversion.  The upper endpoint is
     // the largest float below 2^31, so every converted value is representable.
     float clamped = __builtin_amdgcn_fmed3f(
         value, -2147483648.0f, 2147483520.0f);
     return (int)clamped;
 #else
-    if (!(value == value)) return 0;  // deterministic NaN handling
+    if (!(value == value)) return 0;
     if (value >= 2147483520.0f) return 2147483520;
     if (value <= -2147483648.0f) return (-2147483647 - 1);
     return (int)value;

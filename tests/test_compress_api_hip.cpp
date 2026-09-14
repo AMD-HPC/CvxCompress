@@ -36,12 +36,6 @@ __global__ void initSinKernel(float* data, int nx, int ny, int nz, float kx, flo
     data[idx] = sinf(kx * x) * sinf(ky * y) * sinf(kz * z);
 }
 
-__global__ void fillNaNKernel(float* data, int total)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < total) data[idx] = __int_as_float(0x7fc00000);
-}
-
 static float hostRMS(const float* data, int n)
 {
     double sum = 0.0;
@@ -263,18 +257,6 @@ static bool test_direct_scale_round_trip()
 
     bool pass = stored_mulfac == mulfac && len > 0;
 
-    // NaN coefficients have a deterministic zero representation.
-    fillNaNKernel<<<(total + 255) / 256, 256>>>(d_input, total);
-    long nan_len = 0;
-    HIPCHECK(hipCompress(1.0f, nullptr, d_input, d_comp, plan, 0));
-    HIPCHECK(hipCompressSynchronize(plan, &nan_len, nullptr));
-    HIPCHECK(hipDecompress(d_comp, d_output, plan, 0));
-    std::vector<float> nan_out(total);
-    HIPCHECK(hipMemcpy(nan_out.data(), d_output, total * sizeof(float),
-                       hipMemcpyDeviceToHost));
-    bool nan_ok = nan_len > 0;
-    for (float value : nan_out) nan_ok = nan_ok && value == 0.0f;
-
     // Exercise finite overflow products in the device quantizer.
     initSinKernel<<<(total + 255) / 256, 256>>>(
         d_input, N, N, N, 20.0f, 20.0f, 20.0f);
@@ -284,10 +266,9 @@ static bool test_direct_scale_round_trip()
     HIPCHECK(hipDecompress(d_comp, d_output, plan, 0));
     HIPCHECK(hipDeviceSynchronize());
     bool extreme_ok = extreme_len > 0;
-    pass = pass && nan_ok && extreme_ok;
-    printf("  mulfac=%.1f stored=%.1f nan=%s extreme=%s: %s\n",
-           mulfac, stored_mulfac, nan_ok ? "zero" : "FAIL",
-           extreme_ok ? "ok" : "FAIL",
+    pass = pass && extreme_ok;
+    printf("  mulfac=%.1f stored=%.1f extreme=%s: %s\n",
+           mulfac, stored_mulfac, extreme_ok ? "ok" : "FAIL",
            pass ? "PASS" : "FAIL");
     hipFree(d_input); hipFree(d_output); hipFree(d_comp);
     hipCompressDestroyPlan(plan);

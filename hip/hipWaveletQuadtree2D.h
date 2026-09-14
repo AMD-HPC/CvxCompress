@@ -56,7 +56,6 @@ static constexpr int WQT2D_CODE_THREADS = 64;  // one workgroup per block
 __host__ __device__ __forceinline__ int wqt2d_quantize_i32(float value)
 {
 #if defined(__HIP_DEVICE_COMPILE__)
-    if (__builtin_isnan(value)) return 0;
     float clamped = __builtin_amdgcn_fmed3f(
         value, -2147483648.0f, 2147483520.0f);
     return (int)clamped;

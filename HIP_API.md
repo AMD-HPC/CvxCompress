@@ -272,6 +272,8 @@ if (err != hipSuccess) {
   compressed lengths preserve this alignment when streams are packed.
 - **Compressed input**: `hipDecompress` expects a complete trusted stream
   produced by `hipCompress`; the API does not accept a compressed length.
+- **Wavefield values**: compression input must contain finite `float` values.
+  NaN and infinity are outside the API contract.
 - **Concurrency**: a plan must not be used from multiple host threads. One
   `hipCompress` must be synchronized before the next.
 - **Data type**: `float` only (single precision).

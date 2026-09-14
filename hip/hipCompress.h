@@ -190,7 +190,8 @@ hipError_t hipCopyFromWaveletLayout(
 
 // Wavelet transform + quantize + entropy encode → self-contained stream.
 // Fully async — returns immediately after queuing all GPU work.
-// d_input must be a wavelet-layout buffer (32-divisible dims matching plan).
+// d_input must be a wavelet-layout buffer (32-divisible dims matching plan)
+// containing finite float values.
 //
 // scale + d_rms control the quantization multiplier (mulfac):
 //   d_rms != NULL: mulfac = 1 / (rms * scale).  scale is the error tolerance;
