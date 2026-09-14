@@ -34,6 +34,28 @@ static constexpr int  WBMP_BITMAP_BYTES = WBMP_BITMAP_WORDS * 4;      // 4096
 static constexpr int  WBMP_MAX_VAL_BYTES = 32768 * 4;                 // 131072
 static constexpr long WBMP_SLOT_BYTES     = WBMP_BITMAP_BYTES + WBMP_MAX_VAL_BYTES; // 135168
 
+__host__ __device__ __forceinline__ int hipcvx_quantize_i32(float value)
+{
+#if defined(__HIP_DEVICE_COMPILE__)
+    if (__builtin_isnan(value)) return 0;
+    // Clamp with one V_MED3_F32 before the conversion.  The upper endpoint is
+    // the largest float below 2^31, so every converted value is representable.
+    float clamped = __builtin_amdgcn_fmed3f(
+        value, -2147483648.0f, 2147483520.0f);
+    return (int)clamped;
+#else
+    if (!(value == value)) return 0;  // deterministic NaN handling
+    if (value >= 2147483520.0f) return 2147483520;
+    if (value <= -2147483648.0f) return (-2147483647 - 1);
+    return (int)value;
+#endif
+}
+
+__host__ __device__ __forceinline__ unsigned hipcvx_abs_i32(int value)
+{
+    return value < 0 ? 0u - (unsigned)value : (unsigned)value;
+}
+
 __launch_bounds__(256, 2)
 __global__ void hipcvx_waveletBitmapFusedKernel(
     const float* __restrict__ input,
@@ -65,11 +87,11 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
         float product = rms * scale;
         mulfac = (product > 0.0f && __builtin_isfinite(1.0f / product))
                  ? (1.0f / product) : 1.0f;
-        if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-            if (d_mulfac_out) *d_mulfac_out = mulfac;
-        }
     } else {
         mulfac = scale;
+    }
+    if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        if (d_mulfac_out) *d_mulfac_out = mulfac;
     }
 
     const float* block_base = input + (size_t)blockIdx.z * 32 * ldimxy;
@@ -143,7 +165,7 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
         uint32_t mask = 0;
         #pragma unroll
         for (int z = 0; z < 32; ++z) {
-            int ival = (int)(mulfac * regs[z][x_off]);
+            int ival = hipcvx_quantize_i32(mulfac * regs[z][x_off]);
             if (ival != 0) mask |= (1u << z);
         }
         int nnz = __popc(mask);
@@ -160,7 +182,7 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
         #pragma unroll
         for (int z = 0; z < 32; ++z) {
             if (mask & (1u << z)) {
-                int ival = (int)(mulfac * regs[z][x_off]);
+                int ival = hipcvx_quantize_i32(mulfac * regs[z][x_off]);
                 int rank = __popc(mask & ((1u << z) - 1));
                 val_out[base + rank] = ival;
             }
@@ -175,7 +197,7 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
 }
 
 // Minimum signed byte width to hold [-maxabs, maxabs].
-__host__ __device__ __forceinline__ int wbmp_width_bytes(int maxabs) {
+__host__ __device__ __forceinline__ int wbmp_width_bytes(unsigned maxabs) {
     if (maxabs <= 0x7f)      return 1;
     if (maxabs <= 0x7fff)    return 2;
     if (maxabs <= 0x7fffff)  return 3;

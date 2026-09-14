@@ -35,6 +35,9 @@ HIPLDFLAGS = -lm
 
 # Could drop `hip/` directory and use `$(foreach OBJ,$(HIP_OBJECTS), hip/$(OBJ))`
 HIP_OBJECTS=hip/hipCompress.o
+HIP_API_HEADERS=hip/hipCompress.h hip/hipCompact.h hip/hipBlockCopy.h \
+	hip/hipPlaneIO.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h \
+	hip/hipWaveletQuadtree2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc
 
 all: CvxCompress_Test CvxCompress_Test_Dyn Test_Compression Compress_SEAM_Basin Test_With_Generated_Input
 
@@ -84,6 +87,9 @@ Test_With_Generated_Input: Test_With_Generated_Input.o libcvxcompress.$(LIB_EXT)
 libhipcvxcompress.$(LIB_EXT) : $(HIP_OBJECTS)
 	$(HIPCC) -shared $(HIPLDFLAGS) -o libhipcvxcompress.$(LIB_EXT) $(HIP_OBJECTS)
 
+hip/hipCompress.o: hip/hipCompress.cpp $(HIP_API_HEADERS)
+	$(HIPCC) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -fPIC -c $(HIPCFLAGS) $< -o $@
+
 hip/%.o: hip/%.cpp
 	$(HIPCC) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -fPIC -c $(HIPCFLAGS) hip/$*.cpp -o $@
 
@@ -100,31 +106,34 @@ test_inverse_wavelet_hip: tests/test_inverse_wavelet_hip.cpp hip/ds79.h hip/us79
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_inverse_wavelet_hip.cpp -lm -o $(BUILDDIR)/test_inverse_wavelet_hip
 
 # hipCompress public API test
-test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipCompact.h hip/hipBlockCopy.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/hipWaveletQuadtree2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+test_compress_api_hip: tests/test_compress_api_hip.cpp hip/hipCompress.cpp $(HIP_API_HEADERS) libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_api_hip.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/test_compress_api_hip
 
 # 2D compression test
-test_compress_2d_hip: tests/test_compress_2d_hip.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipCompact.h hip/hipBlockCopy.h hip/hipWaveletQuadtree2D.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+test_compress_2d_hip: tests/test_compress_2d_hip.cpp hip/hipCompress.cpp $(HIP_API_HEADERS) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_compress_2d_hip.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/test_compress_2d_hip
 
 # 2D quadtree (GPU) vs CvxCompress (CPU) rate-distortion comparison on real data
-bench_quadtree_vs_cvx_2d: tests/bench_quadtree_vs_cvx_2d.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipCompact.h hip/hipWaveletQuadtree2D.h hip/hipBlockCopy.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc CvxCompress.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+bench_quadtree_vs_cvx_2d: tests/bench_quadtree_vs_cvx_2d.cpp hip/hipCompress.cpp $(HIP_API_HEADERS) CvxCompress.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/bench_quadtree_vs_cvx_2d.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/bench_quadtree_vs_cvx_2d
 
 # Async / aux-stream behaviour on 3D data: split-vs-serial equivalence, input
 # lifetime, and measured overlap of the aux tail with caller work.
-test_async_overlap_3d: tests/test_async_overlap_3d.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipCompact.h hip/hipBlockCopy.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+test_async_overlap_3d: tests/test_async_overlap_3d.cpp hip/hipCompress.cpp $(HIP_API_HEADERS) libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_async_overlap_3d.cpp hip/hipCompress.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -lm -o $(BUILDDIR)/test_async_overlap_3d
 
 # Full-encode throughput, one codec at a time (argv[5] selects it). No
 # -lcvxcompress: the codec kernels live in the headers, so the binary must
 # compile its own copy or an A/B on a header change compares two identical .so's.
-bench_encode_full: tests/bench_encode_full.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipCompact.h hip/hipBlockCopy.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+bench_encode_full: tests/bench_encode_full.cpp hip/hipCompress.cpp $(HIP_API_HEADERS) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/bench_encode_full.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/bench_encode_full
 
 # Async pipeline example (for profiling)
-example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp hip/hipCompress.h hip/hipCompact.h hip/hipBlockCopy.h hip/hipWaveletBitmap.h hip/hipWaveletOctree.h hip/hipWaveletQuadtree2D.h hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
+example_async_pipeline: tests/example_async_pipeline.cpp hip/hipCompress.cpp $(HIP_API_HEADERS) | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/example_async_pipeline.cpp hip/hipCompress.cpp -lm -o $(BUILDDIR)/example_async_pipeline
+
+scan_raw_scales: tests/scan_raw_scales.cpp CvxCompress.hxx libcvxcompress.$(LIB_EXT) | $(BUILDDIR)
+	$(CXX) $(CFLAGS) $(TFLAG) -I. tests/scan_raw_scales.cpp -L. -lcvxcompress '-Wl,-rpath,$$ORIGIN/..' -o $(BUILDDIR)/scan_raw_scales
 
 clean:
 	rm -f *.o

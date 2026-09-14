@@ -37,6 +37,12 @@ __global__ void initSin2DKernel(float* data, int nx, int ny, float kx, float ky)
     data[idx] = sinf(kx * x) * sinf(ky * y);
 }
 
+__global__ void fillNaN2DKernel(float* data, int total)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) data[idx] = __int_as_float(0x7fc00000);
+}
+
 static float hostRMS(const float* data, int n)
 {
     double sum = 0.0;
@@ -160,6 +166,27 @@ static bool test_round_trip_2d()
     printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n", max_err, rms, rel_err);
 
     bool pass = (max_err < rms) && (cr > 1.0f);
+
+    const float direct_mulfac = 32.0f;
+    HIPCHECK(hipCompress(direct_mulfac, nullptr, d_input, d_compressed, plan, 0));
+    HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+    float stored_mulfac = 0.0f;
+    HIPCHECK(hipMemcpy(&stored_mulfac, plan->d_mulfac, sizeof(float),
+                       hipMemcpyDeviceToHost));
+    bool direct_ok = stored_mulfac == direct_mulfac;
+    printf("  direct scale: stored mulfac=%.1f: %s\n",
+           stored_mulfac, direct_ok ? "PASS" : "FAIL");
+
+    fillNaN2DKernel<<<blocks, threads>>>(d_input, total);
+    HIPCHECK(hipCompress(1.0f, nullptr, d_input, d_compressed, plan, 0));
+    HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+    HIPCHECK(hipDecompress(d_compressed, d_output, plan, 0));
+    HIPCHECK(hipMemcpy(h_out.data(), d_output, total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    bool nan_ok = true;
+    for (float value : h_out) nan_ok = nan_ok && value == 0.0f;
+    printf("  NaN quantization: %s\n", nan_ok ? "PASS" : "FAIL");
+    pass = pass && direct_ok && nan_ok;
     printf("  round-trip: %s\n", pass ? "PASS" : "FAIL");
 
     hipFree(d_input); hipFree(d_output); hipFree(d_compressed);

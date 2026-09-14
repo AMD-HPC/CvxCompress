@@ -24,10 +24,8 @@ https://library.seg.org/doi/pdf/10.1190/1.1826518
 See [HIP_API.md](HIP_API.md) for the AMD GPU port of this library targeting
 MI200/MI300X/MI355X via HIP. It implements a fused wavelet + quantization +
 significance coding pipeline in GPU kernels (default: octree for 3D,
-quadtree for 2D), achieving 14–27x speedup over the fully-parallelized CPU
-reference (128-core EPYC 9554, AVX, best thread count) with matching error norms
-(to floating-point rounding). Includes API reference, usage examples, and async
-pipeline integration.
+quadtree for 2D), with matching error norms to floating-point rounding.
+Includes API reference, usage examples, and async pipeline integration.
 
 # Building
 

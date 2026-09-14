@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cfloat>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,8 +78,10 @@ const char* hipCompressErrorString(hipCompressError_t err)
     case HIP_COMPRESS_ERROR_INVALID_SCALE:    return "scale must be > 0 and finite";
     case HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH:     return "extraction wavelet dims must equal plan dims";
     case HIP_COMPRESS_ERROR_PLANE_TOO_LARGE:  return "single plane too large (nx * ny must be < 2^31 elements)";
+    case HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE: return "volume has too many blocks";
     case HIP_COMPRESS_ERROR_INVALID_CODEC:    return "codec is invalid for this plan";
     case HIP_COMPRESS_ERROR_INVALID_AUX_STAGE: return "invalid auxiliary stream stage";
+    case HIP_COMPRESS_ERROR_INVALID_ALIGNMENT: return "compressed buffer must be 8-byte aligned";
     case HIP_COMPRESS_ERROR_HIP_RUNTIME:      return "internal HIP runtime error";
     default:                                  return "unknown error";
     }
@@ -114,6 +117,17 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     if ((long)nx * (long)ny > (long)INT_MAX)
         PLAN_ERROR(p, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE, hipErrorInvalidValue);
 
+    const size_t blocks_xy = (size_t)(nx / 32) * (size_t)(ny / 32);
+    const size_t blocks_z = is_2d ? 1 : (size_t)(nz / 32);
+    const size_t copy_z = ((size_t)nz + BCOPY_ZPB - 1) / BCOPY_ZPB;
+    const size_t max_header_blocks = ((size_t)INT_MAX - 12) / 12;
+    if (blocks_z == 0 || blocks_xy > max_header_blocks / blocks_z ||
+        blocks_xy > (size_t)INT_MAX / copy_z)
+        PLAN_ERROR(p, HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE,
+                   hipErrorInvalidValue);
+    const size_t num_blocks = blocks_xy * blocks_z;
+    const size_t copy_blocks = blocks_xy * copy_z;
+
     // Resolve the dimensionality-selected default to a concrete codec.
     const hipCompressKernel requested = kernel;
     if (kernel == HIP_COMPRESS_KERNEL_AUTO) {
@@ -142,20 +156,20 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
         // Octree is 3D only.
         if (kernel == HIP_COMPRESS_KERNEL_OCTREE)
             PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_CODEC, hipErrorInvalidValue);
-        p->num_blocks = (nx / 32) * (ny / 32);
+        p->num_blocks = (int)num_blocks;
         // d_scratch holds the per-block int32 32x32 grid.
         p->scratch_slot_stride = (size_t)WQT2D_GRID_BYTES;
     } else {
         // Quadtree significance coder is 2D only.
         if (kernel == HIP_COMPRESS_KERNEL_QUADTREE)
             PLAN_ERROR(p, HIP_COMPRESS_ERROR_INVALID_CODEC, hipErrorInvalidValue);
-        p->num_blocks = (nx / 32) * (ny / 32) * (nz / 32);
+        p->num_blocks = (int)num_blocks;
         // d_scratch holds the kernel-1 bitmap+values layout.
         p->scratch_slot_stride = (size_t)WBMP_SLOT_BYTES;
     }
 
     int nb = p->num_blocks;
-    long scratch_size = (long)nb * (long)p->scratch_slot_stride;
+    size_t scratch_size = (size_t)nb * p->scratch_slot_stride;
 
     HIPCHECK_PLAN(p, hipMalloc(&p->d_scratch, scratch_size));
     HIPCHECK_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
@@ -164,12 +178,12 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
 
     if (kernel == HIP_COMPRESS_KERNEL_OCTREE) {
         HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
-                                   (long)nb * WOCT_CODE_SLOT_BYTES));
+                                   (size_t)nb * WOCT_CODE_SLOT_BYTES));
         HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
         HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
     } else if (kernel == HIP_COMPRESS_KERNEL_QUADTREE) {
         HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
-                                   (long)nb * WQT2D_CODE_SLOT_BYTES));
+                                   (size_t)nb * WQT2D_CODE_SLOT_BYTES));
         HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
         HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
     }
@@ -182,9 +196,7 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
 
     HIPCHECK_PLAN(p, hipMalloc(&p->d_rms, sizeof(double)));
 
-    int nz_for_copy = is_2d ? 1 : nz;
-    p->max_copy_blocks = (nx / 32) * (ny / 32)
-                       * ((nz_for_copy + BCOPY_ZPB - 1) / BCOPY_ZPB);
+    p->max_copy_blocks = (int)copy_blocks;
     HIPCHECK_PLAN(p, hipMalloc(&p->d_partial_sums, p->max_copy_blocks * sizeof(double)));
 
     HIPCHECK_PLAN(p, hipEventCreateWithFlags(&p->ready_event, hipEventDisableTiming));
@@ -196,6 +208,7 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
         p->d_block_sizes, p->d_block_offsets, (size_t)0, (size_t)1,
         rocprim::plus<size_t>(), aux_stream);
     if (err != hipSuccess) { p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME; return err; }
+    HIPCHECK_PLAN(p, hipEventRecord(p->ready_event, aux_stream));
     HIPCHECK_PLAN(p, hipStreamSynchronize(aux_stream));
 
     p->last_error = HIP_COMPRESS_SUCCESS;
@@ -227,6 +240,10 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan)
 {
     if (!plan) return hipErrorInvalidValue;
+    if (plan->compress_pending)
+        (void)hipStreamSynchronize(plan->pending_stream);
+    if (plan->ready_event)
+        (void)hipEventSynchronize(plan->ready_event);
     (void)hipFree(plan->d_scratch);
     (void)hipFree(plan->d_mulfac);
     (void)hipFree(plan->d_block_sizes);
@@ -261,6 +278,14 @@ hipError_t hipCompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_COMPRESS_PENDING, hipErrorNotReady);
     if (scale <= 0.0f || !std::isfinite(scale))
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_SCALE, hipErrorInvalidValue);
+    if (plan->aux_from != HIP_COMPRESS_AUX_NONE &&
+        plan->aux_from != HIP_COMPRESS_AUX_FROM_COMPACT &&
+        plan->aux_from != HIP_COMPRESS_AUX_FROM_ENCODE)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_AUX_STAGE,
+                   hipErrorInvalidValue);
+    if ((uintptr_t)d_output & 7u)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
+                   hipErrorInvalidValue);
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int ldimx = nx;
@@ -269,6 +294,7 @@ hipError_t hipCompress(
     // OCTREE and QUADTREE carry a per-block significance-size table.
     const int hdr_size = hipOctreeHeaderSize(nb, num_mulfacs);
     hipStream_t s = user_stream;
+    HIPCHECK_PLAN(plan, hipStreamWaitEvent(s, plan->ready_event, 0));
     // AUX_NONE collapses aux onto the user stream, which makes every "aux"
     // launch below run in order on s and turns bridge() into a no-op.
     hipStream_t aux = (plan->aux_from == HIP_COMPRESS_AUX_NONE)
@@ -306,10 +332,12 @@ hipError_t hipCompress(
         hipcvx_waveletQuadtree2DForwardKernel<<<grid, dim3(256), 0, s>>>(
             d_input, reinterpret_cast<int*>(plan->d_scratch),
             scale, ldimx, nbx, d_rms, plan->d_mulfac);
+        HIPCHECK_PLAN(plan, hipGetLastError());
         HIPCHECK_PLAN(plan, bridge_before_encode());
         hipcvx_waveletQuadtree2DCodeKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, enc>>>(
             reinterpret_cast<const int*>(plan->d_scratch), plan->d_octree_coded,
             plan->d_block_sizes, plan->d_octree_sig_sizes);
+        HIPCHECK_PLAN(plan, hipGetLastError());
     } else {
         const int ldimxy = nx * ny;
         dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
@@ -319,6 +347,7 @@ hipError_t hipCompress(
                 d_input, plan->d_scratch, plan->d_block_sizes,
                 scale, ldimx, ldimxy,
                 d_rms, plan->d_mulfac);
+            HIPCHECK_PLAN(plan, hipGetLastError());
             HIPCHECK_PLAN(plan, bridge_before_encode());
             // encode: octree significance + width table + packed values → coded
             // slots.  d_block_sizes := coded length; d_octree_sig_sizes :=
@@ -326,9 +355,11 @@ hipError_t hipCompress(
             hipcvx_waveletOctreeCodeParKernel<<<nb, dim3(WOCT_PAR_THREADS), 0, enc>>>(
                 plan->d_scratch, plan->d_octree_coded,
                 plan->d_block_sizes, plan->d_octree_sig_sizes);
+            HIPCHECK_PLAN(plan, hipGetLastError());
             // 4-align each coded length so packed blocks keep uint32 reads
             // (width table / flat masks) aligned in the compacted stream.
-            waveletOctreeCodeParAlignSizes(plan->d_block_sizes, nb, enc);
+            HIPCHECK_PLAN(plan, waveletOctreeCodeParAlignSizes(
+                plan->d_block_sizes, nb, enc));
         }
     }
 
@@ -354,6 +385,7 @@ hipError_t hipCompress(
             plan->d_block_sizes, plan->d_block_offsets, plan->d_octree_sig_sizes,
             d_output, nb, num_mulfacs, plan->d_mulfac);
     }
+    HIPCHECK_PLAN(plan, hipGetLastError());
 
     // 5. Async readback on aux_stream
     HIPCHECK_PLAN(plan, hipMemcpyAsync(&plan->h_staging[0], plan->d_block_offsets + (nb - 1),
@@ -552,6 +584,14 @@ hipError_t hipDecompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_INPUT, hipErrorInvalidValue);
     if (!d_output)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NULL_OUTPUT, hipErrorInvalidValue);
+    if (plan->compress_pending)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_COMPRESS_PENDING, hipErrorNotReady);
+    if ((uintptr_t)d_input & 7u)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
+                   hipErrorInvalidValue);
+
+    HIPCHECK_PLAN(plan, hipStreamWaitEvent(
+        user_stream, plan->ready_event, 0));
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int ldimx = nx;
@@ -562,6 +602,7 @@ hipError_t hipDecompress(
         const int nb = plan->num_blocks;
         hipcvx_waveletQuadtree2DDecodeHdrKernel<<<nb, dim3(WQT2D_CODE_THREADS), 0, user_stream>>>(
             d_input, reinterpret_cast<int*>(plan->d_scratch), plan->d_inv_scale);
+        HIPCHECK_PLAN(plan, hipGetLastError());
         hipcvx_waveletQuadtree2DInverseKernel<<<grid, dim3(256), 0, user_stream>>>(
             reinterpret_cast<const int*>(plan->d_scratch), d_output,
             plan->d_inv_scale, ldimx, nbx);
@@ -574,6 +615,7 @@ hipError_t hipDecompress(
             // publishes inv_scale = 1/mulfac (device) for stage B.
             hipcvx_waveletOctreeDecodeToBitmapHdrKernel<<<nb, dim3(WOCT_PAR_THREADS), 0, user_stream>>>(
                 d_input, plan->d_scratch, plan->d_inv_scale);
+            HIPCHECK_PLAN(plan, hipGetLastError());
             // stage B: dequantize + inverse wavelet ZYX → wavefield.
             hipcvx_waveletBitmapInverseFusedDevKernel<<<grid, dim3(256), 0, user_stream>>>(
                 plan->d_scratch, d_output, plan->d_inv_scale, ldimx, ldimxy);
@@ -583,6 +625,11 @@ hipError_t hipDecompress(
     hipError_t launch_err = hipGetLastError();
     if (launch_err != hipSuccess)
         plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
+    if (launch_err == hipSuccess) {
+        launch_err = hipEventRecord(plan->ready_event, user_stream);
+        if (launch_err != hipSuccess)
+            plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
+    }
     return launch_err;
 }
 

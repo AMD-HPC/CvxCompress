@@ -15,14 +15,6 @@ and codes their significance and values. The coder is selectable per plan; the d
 resolves to octree for 3D and quadtree for 2D.
 Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 
-### Performance (MI300X vs 128-core EPYC 9554, AVX, best thread count)
-
-| Volume | GPU fwd (ms) | CPU best fwd (ms) | CPU threads | Speedup |
-|--------|-------------|-------------------|-------------|---------|
-| 256^3 (64 MB)   | 0.14 | 3.7  | 32  | 27x |
-| 512^3 (512 MB)  | 0.72 | 14.6 | 128 | 20x |
-| 1024^3 (4 GB)   | 5.4  | 76.2 | 64  | 14x |
-
 The API can move the scan, compaction, and readback tail to a separate stream.
 The best stream placement depends on the caller's GPU workload. Profile the
 integrated pipeline instead of assuming overlap will hide compression.
@@ -41,7 +33,7 @@ module load rocm/7.2.1
 # Build the CPU reference library (needed by tests)
 make libcvxcompress.so
 
-# Build the API test suite (37 tests + benchmarks)
+# Build the API test suite (38 tests + benchmarks)
 make HIP_ARCH=gfx942 test_compress_api_hip
 
 # Build the async pipeline example
@@ -75,7 +67,7 @@ All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
 |----------|-------------|
 | `hipCompress` | Wavelet + quantize + encode (per-plan codec) → self-contained compressed stream (async) |
 | `hipCompressSynchronize` | Block until compress completes, retrieve compressed length and CR |
-| `hipDecompress` | Decode (per-plan codec) + inverse wavelet → wavelet buffer (single kernel, async) |
+| `hipDecompress` | Decode (per-plan codec) + inverse wavelet → wavelet buffer (async) |
 
 ### Utilities
 
@@ -212,7 +204,7 @@ The codec is bound to the plan (internal buffer sizes and stream header layout
 differ per codec), so the switching granularity is "which plan you create"; an
 existing plan's codec cannot be changed in place. Octree is 3D only and
 quadtree is 2D only. Requesting one for the wrong dimensionality fails
-plan creation with `HIP_COMPRESS_ERROR_INVALID_DIMENSIONS`. `AUTO` avoids this
+plan creation with `HIP_COMPRESS_ERROR_INVALID_CODEC`. `AUTO` avoids this
 by resolving to the dimensionality-appropriate coder at plan creation.
 
 **Choosing a codec.** Use `AUTO` unless you need to pin the dimensionality-specific
@@ -270,10 +262,16 @@ if (err != hipSuccess) {
 
 ## Limitations
 
-- **Plane size**: `nx × ny × 4` must not exceed 4 GB (plan dimensions and source
-  grid `ldimxy` are both validated).
-- **Minimum dimensions**: extraction window must be ≥ 32 in each axis.
-- **Alignment**: all plan dimensions must be multiples of 32.
+- **Plane size**: `nx × ny` must not exceed `INT_MAX` elements. Source strides
+  use `int`; the library does not know or validate the source allocation size.
+- **Minimum dimensions**: a 3D extraction must be at least 32 in each axis. A
+  2D extraction uses `ez = 1` and requires `ex, ey >= 32`.
+- **Dimensions**: 3D plan dimensions must be multiples of 32. A 2D plan uses
+  `nz = 1` and requires `nx` and `ny` to be multiples of 32.
+- **Compressed buffers**: stream bases must be 8-byte aligned. Returned
+  compressed lengths preserve this alignment when streams are packed.
+- **Compressed input**: `hipDecompress` expects a complete trusted stream
+  produced by `hipCompress`; the API does not accept a compressed length.
 - **Concurrency**: a plan must not be used from multiple host threads. One
   `hipCompress` must be synchronized before the next.
 - **Data type**: `float` only (single precision).

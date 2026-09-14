@@ -53,6 +53,26 @@ static constexpr long WQT2D_CODE_SLOT_BYTES = (WQT2D_CODE_SLOT_RAW + 15) & ~15L;
 
 static constexpr int WQT2D_CODE_THREADS = 64;  // one workgroup per block
 
+__host__ __device__ __forceinline__ int wqt2d_quantize_i32(float value)
+{
+#if defined(__HIP_DEVICE_COMPILE__)
+    if (__builtin_isnan(value)) return 0;
+    float clamped = __builtin_amdgcn_fmed3f(
+        value, -2147483648.0f, 2147483520.0f);
+    return (int)clamped;
+#else
+    if (!(value == value)) return 0;
+    if (value >= 2147483520.0f) return 2147483520;
+    if (value <= -2147483648.0f) return (-2147483647 - 1);
+    return (int)value;
+#endif
+}
+
+__host__ __device__ __forceinline__ unsigned wqt2d_abs_i32(int value)
+{
+    return value < 0 ? 0u - (unsigned)value : (unsigned)value;
+}
+
 // Minimum signed byte width to hold [-maxabs, maxabs].
 __host__ __device__ __forceinline__ int wqt2d_width_bytes(unsigned maxabs) {
     if (maxabs <= 0x7fu)      return 1;
@@ -177,7 +197,7 @@ wqt2d_pfor_encode(const int* g, const uint32_t* m, unsigned char* out) {
     int cnt[5] = {0, 0, 0, 0, 0}, nnz = 0, Whi = 0;
     for (int r = 0; r < 32; ++r) { uint32_t mm = m[r]; if (!mm) continue;
         for (int c = 0; c < 32; ++c) if (mm & (1u << c)) {
-            int v = g[r * 32 + c]; unsigned a = (unsigned)(v < 0 ? -v : v);
+            int v = g[r * 32 + c]; unsigned a = wqt2d_abs_i32(v);
             int w = wqt2d_width_bytes(a); ++cnt[w]; ++nnz; if (w > Whi) Whi = w;
         }
     }
@@ -201,7 +221,7 @@ wqt2d_pfor_encode(const int* g, const uint32_t* m, unsigned char* out) {
         for (int c = 0; c < 32; ++c) if (mm & (1u << c)) {
             int v = g[r * 32 + c]; unsigned uv = (unsigned)v;
             for (int b = 0; b < Wlo; ++b) out[base_off + (long)i * Wlo + b] = (unsigned char)(uv >> (8 * b));
-            unsigned a = (unsigned)(v < 0 ? -v : v);
+            unsigned a = wqt2d_abs_i32(v);
             if (wqt2d_width_bytes(a) > Wlo) {          // exception
                 out[mask_off + (i >> 3)] |= (unsigned char)(1u << (i & 7));
                 for (int b = 0; b < Whi - Wlo; ++b)
@@ -271,11 +291,11 @@ __global__ void hipcvx_waveletQuadtree2DForwardKernel(
         float product = rms * scale;
         mulfac = (product > 0.0f && __builtin_isfinite(1.0f / product))
                  ? (1.0f / product) : 1.0f;
-        if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && d_mulfac_out)
-            *d_mulfac_out = mulfac;
     } else {
         mulfac = scale;
     }
+    if (tid == 0 && blockIdx.x == 0 && blockIdx.y == 0 && d_mulfac_out)
+        *d_mulfac_out = mulfac;
 
     int wg_tile_x0 = blockIdx.x * WQT2D_TILES_PER_WG;
 
@@ -340,7 +360,8 @@ __global__ void hipcvx_waveletQuadtree2DForwardKernel(
             int global_bid = tile_bx + blockIdx.y * nbx;
             int* g = grid_out + (size_t)global_bid * WQT2D_GRID_INTS + row * 32;
             #pragma unroll
-            for (int x = 0; x < 32; x++) g[x] = (int)(mulfac * xline[x]);
+            for (int x = 0; x < 32; x++)
+                g[x] = wqt2d_quantize_i32(mulfac * xline[x]);
         }
         __syncthreads();
     }
@@ -439,6 +460,14 @@ __global__ void hipcvx_wqt2dCompactKernel(
             for (size_t b = 0; b < remain; ++b)
                 dst[dst_off + i + b] = (unsigned char)(val >> (b * 8));
         }
+    }
+
+    if (bid == num_blocks - 1 && tid == 0) {
+        size_t total = 8 + 12L * num_blocks + 4L * num_mulfacs
+                     + dst_off + size;
+        size_t padded = (total + 7) & ~(size_t)7;
+        for (size_t i = 0; i < padded - total; ++i)
+            dst[dst_off + size + i] = 0;
     }
 }
 

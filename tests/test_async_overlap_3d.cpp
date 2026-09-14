@@ -114,13 +114,15 @@ static const float SCALE = 5e-2f;
 // Compress d_in through a plan whose aux_stream is `aux`, then decompress.
 // Returns the compressed length; fills h_out with the reconstruction.
 static long compressRoundTrip(hipCompressKernel kern, hipStream_t aux_for_plan,
-                              bool aux_is_user, hipStream_t user,
+                              hipCompressAuxStage aux_from, bool aux_is_user,
+                              hipStream_t user,
                               const float* d_in, float* h_out, float* d_wav,
                               float* d_rec, unsigned char* d_comp)
 {
     hipCompressPlan* plan = nullptr;
     HIPCHECK(hipCompressCreatePlan(&plan, N, N, N,
-                                   aux_is_user ? user : aux_for_plan, kern));
+                                   aux_is_user ? user : aux_for_plan, kern,
+                                   aux_from));
     HIPCHECK(hipCopyToWaveletLayout(d_in, N, (size_t)N * N, 0, 0, 0, N, N, N,
                                     d_wav, plan->d_rms, plan, user));
     HIPCHECK(hipCompress(SCALE, plan->d_rms, d_wav, d_comp, plan, user));
@@ -143,21 +145,28 @@ static void testEquivalence(hipStream_t user, hipStream_t aux,
 {
     printf("  Test 1: split vs serial equivalence (3D %d^3)\n", N);
     std::vector<float> a(TOTAL), b(TOTAL);
+    const hipCompressAuxStage stages[] = {
+        HIP_COMPRESS_AUX_NONE,
+        HIP_COMPRESS_AUX_FROM_COMPACT,
+        HIP_COMPRESS_AUX_FROM_ENCODE,
+    };
+    const char* stage_names[] = {"none", "compact", "encode"};
     for (int c = 0; c < NCODEC; ++c) {
-        // aux == user: the bridge degenerates to a stream waiting on itself.
-        // Must not deadlock (property 4) and defines the reference bytes.
-        long len_ser = compressRoundTrip(CODECS[c].k, aux, true, user,
-                                         d_in, a.data(), d_wav, d_rec, d_comp);
-        // distinct aux: the real split.
-        long len_spl = compressRoundTrip(CODECS[c].k, aux, false, user,
-                                         d_in, b.data(), d_wav, d_rec, d_comp);
-        char msg[128];
-        snprintf(msg, sizeof msg, "%s: length %ld == %ld", CODECS[c].name,
-                 len_ser, len_spl);
-        check(len_ser == len_spl && len_ser > 0, msg);
-        snprintf(msg, sizeof msg, "%s: reconstruction bit-identical",
-                 CODECS[c].name);
-        check(memcmp(a.data(), b.data(), TOTAL * sizeof(float)) == 0, msg);
+        for (int st = 0; st < 3; ++st) {
+            long len_ser = compressRoundTrip(
+                CODECS[c].k, aux, stages[st], true, user,
+                d_in, a.data(), d_wav, d_rec, d_comp);
+            long len_spl = compressRoundTrip(
+                CODECS[c].k, aux, stages[st], false, user,
+                d_in, b.data(), d_wav, d_rec, d_comp);
+            char msg[128];
+            snprintf(msg, sizeof msg, "%s/%s: length %ld == %ld",
+                     CODECS[c].name, stage_names[st], len_ser, len_spl);
+            check(len_ser == len_spl && len_ser > 0, msg);
+            snprintf(msg, sizeof msg, "%s/%s: reconstruction bit-identical",
+                     CODECS[c].name, stage_names[st]);
+            check(memcmp(a.data(), b.data(), TOTAL * sizeof(float)) == 0, msg);
+        }
     }
 }
 
@@ -172,32 +181,46 @@ static void testInputLifetime(hipStream_t user, hipStream_t aux,
     std::vector<float> ref(TOTAL), got(TOTAL);
     int threads = 256;
     size_t wav_total = TOTAL;   // 256 is 32-divisible, so wavelet dims == N
+    const hipCompressAuxStage stages[] = {
+        HIP_COMPRESS_AUX_NONE,
+        HIP_COMPRESS_AUX_FROM_COMPACT,
+        HIP_COMPRESS_AUX_FROM_ENCODE,
+    };
+    const char* stage_names[] = {"none", "compact", "encode"};
     for (int c = 0; c < NCODEC; ++c) {
-        compressRoundTrip(CODECS[c].k, aux, false, user, d_in, ref.data(),
-                          d_wav, d_rec, d_comp);
+        for (int st = 0; st < 3; ++st) {
+            compressRoundTrip(CODECS[c].k, aux, stages[st], false, user,
+                              d_in, ref.data(), d_wav, d_rec, d_comp);
 
-        // Same compress, but the instant hipCompress hands user_stream back we
-        // enqueue a kernel that destroys the wavelet buffer it was reading. If
-        // any aux-stream stage still needed d_input, this corrupts the output.
-        hipCompressPlan* plan = nullptr;
-        HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, aux, CODECS[c].k));
-        HIPCHECK(hipCopyToWaveletLayout(d_in, N, (size_t)N * N, 0, 0, 0,
-                                        N, N, N, d_wav, plan->d_rms, plan, user));
-        HIPCHECK(hipCompress(SCALE, plan->d_rms, d_wav, d_comp, plan, user));
-        clobberKernel<<<(wav_total + threads - 1) / threads, threads, 0, user>>>(
-            d_wav, wav_total);
-        long len = 0; float cr = 0;
-        HIPCHECK(hipCompressSynchronize(plan, &len, &cr));
-        HIPCHECK(hipDecompress(d_comp, d_rec, plan, user));
-        HIPCHECK(hipStreamSynchronize(user));
-        HIPCHECK(hipMemcpy(got.data(), d_rec, TOTAL * sizeof(float),
-                           hipMemcpyDeviceToHost));
-        HIPCHECK(hipCompressDestroyPlan(plan));
+            // Same compress, but the instant hipCompress hands user_stream
+            // back we enqueue a kernel that destroys the wavelet buffer it
+            // was reading. If any aux-stream stage still needed d_input, this
+            // corrupts the output.
+            hipCompressPlan* plan = nullptr;
+            HIPCHECK(hipCompressCreatePlan(
+                &plan, N, N, N, aux, CODECS[c].k, stages[st]));
+            HIPCHECK(hipCopyToWaveletLayout(
+                d_in, N, (size_t)N * N, 0, 0, 0, N, N, N,
+                d_wav, plan->d_rms, plan, user));
+            HIPCHECK(hipCompress(
+                SCALE, plan->d_rms, d_wav, d_comp, plan, user));
+            clobberKernel<<<(wav_total + threads - 1) / threads,
+                            threads, 0, user>>>(d_wav, wav_total);
+            long len = 0; float cr = 0;
+            HIPCHECK(hipCompressSynchronize(plan, &len, &cr));
+            HIPCHECK(hipDecompress(d_comp, d_rec, plan, user));
+            HIPCHECK(hipStreamSynchronize(user));
+            HIPCHECK(hipMemcpy(got.data(), d_rec, TOTAL * sizeof(float),
+                               hipMemcpyDeviceToHost));
+            HIPCHECK(hipCompressDestroyPlan(plan));
 
-        char msg[128];
-        snprintf(msg, sizeof msg, "%s: output survives clobber of d_input",
-                 CODECS[c].name);
-        check(memcmp(ref.data(), got.data(), TOTAL * sizeof(float)) == 0, msg);
+            char msg[128];
+            snprintf(msg, sizeof msg,
+                     "%s/%s: output survives clobber of d_input",
+                     CODECS[c].name, stage_names[st]);
+            check(memcmp(ref.data(), got.data(),
+                         TOTAL * sizeof(float)) == 0, msg);
+        }
     }
 }
 
@@ -231,7 +254,9 @@ static void testOverlap(hipStream_t user, hipStream_t aux, const float* d_in,
            "codec", "stencil", "compress", "together", "hidden");
     for (int c = 0; c < NCODEC; ++c) {
         hipCompressPlan* plan = nullptr;
-        HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, aux, CODECS[c].k));
+        HIPCHECK(hipCompressCreatePlan(
+            &plan, N, N, N, aux, CODECS[c].k,
+            HIP_COMPRESS_AUX_FROM_COMPACT));
         HIPCHECK(hipCopyToWaveletLayout(d_in, N, (size_t)N * N, 0, 0, 0,
                                         N, N, N, d_wav, plan->d_rms, plan, user));
         HIPCHECK(hipStreamSynchronize(user));

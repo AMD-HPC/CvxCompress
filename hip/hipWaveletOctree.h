@@ -733,7 +733,7 @@ __global__ void hipcvx_waveletOctreeCodeParKernel(
 
     // per-line width histogram (local counts, then block reduce)
     int lc1=0,lc2=0,lc3=0,lc4=0;
-    for (int k=0;k<nz;++k){ int a=val[in_off+k]; a=a<0?-a:a; int w=wbmp_width_bytes(a);
+    for (int k=0;k<nz;++k){ unsigned a=hipcvx_abs_i32(val[in_off+k]); int w=wbmp_width_bytes(a);
         if(w<=1)++lc1; else if(w==2)++lc2; else if(w==3)++lc3; else ++lc4; }
     __shared__ int sh_h[5];
     __shared__ int sh_wlo;
@@ -786,7 +786,7 @@ __global__ void hipcvx_waveletOctreeCodeParKernel(
             long q = base_base + g * Wlo;
             #pragma unroll
             for (int b=0;b<4;++b) if (b<Wlo) blk_out[q + b] = (unsigned char)(uv >> (8*b));
-            int a = v<0?-v:v;
+            unsigned a = hipcvx_abs_i32(v);
             if (wbmp_width_bytes(a) > Wlo){
                 atomicOr(&mp[g>>5], 1u << (g & 31));
                 long pq = patch_base + (long)(ex_base + local_ex) * (Whi - Wlo);
@@ -874,6 +874,14 @@ __global__ void hipcvx_woctCompactKernel(
             for (size_t b = 0; b < remain; ++b)
                 dst[dst_off + i + b] = (unsigned char)(val >> (b * 8));
         }
+    }
+
+    if (bid == num_blocks - 1 && tid == 0) {
+        size_t total = 8 + 12L * num_blocks + 4L * num_mulfacs
+                     + dst_off + size;
+        size_t padded = (total + 7) & ~(size_t)7;
+        for (size_t i = 0; i < padded - total; ++i)
+            dst[dst_off + size + i] = 0;
     }
 }
 

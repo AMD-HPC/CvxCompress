@@ -6,6 +6,7 @@
 #define HIP_CVX_COMPRESS_H
 
 #include <hip/hip_runtime.h>
+#include <climits>
 
 enum hipCompressError_t {
     HIP_COMPRESS_SUCCESS = 0,
@@ -25,6 +26,8 @@ enum hipCompressError_t {
     HIP_COMPRESS_ERROR_INVALID_CODEC,
     HIP_COMPRESS_ERROR_INVALID_AUX_STAGE,
     HIP_COMPRESS_ERROR_HIP_RUNTIME,
+    HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE,
+    HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
 };
 
 struct hipCompressPlan;
@@ -108,8 +111,10 @@ struct hipCompressPlan {
     mutable hipCompressError_t last_error;
 };
 
-// Round up to the next multiple of 32.
+// Round a positive dimension up to the next multiple of 32. Returns 0 when
+// the input is non-positive or the rounded result would overflow int.
 inline int hipCompressWaveletDim(int n) {
+    if (n <= 0 || n > INT_MAX - 31) return 0;
     return (n + 31) & ~31;
 }
 
@@ -219,7 +224,9 @@ hipError_t hipCompressSynchronize(
 
 // Entropy decode + inverse wavelet → wavelet-layout buffer.
 // Reads the self-contained header (block offsets, mulfac) from d_input.
-// Single kernel launch on user_stream. No sync.
+// Enqueues two kernels on user_stream. No host sync. Calls on one plan are
+// ordered through an internal event because they share decode scratch.
+// d_input must point to a complete trusted stream produced by hipCompress.
 hipError_t hipDecompress(
     const unsigned char* d_input,
     float* d_output,
