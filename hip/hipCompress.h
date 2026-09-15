@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -6,6 +6,7 @@
 #define HIP_CVX_COMPRESS_H
 
 #include <hip/hip_runtime.h>
+#include <climits>
 
 enum hipCompressError_t {
     HIP_COMPRESS_SUCCESS = 0,
@@ -22,7 +23,11 @@ enum hipCompressError_t {
     HIP_COMPRESS_ERROR_INVALID_SCALE,
     HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH,
     HIP_COMPRESS_ERROR_PLANE_TOO_LARGE,
+    HIP_COMPRESS_ERROR_INVALID_CODEC,
+    HIP_COMPRESS_ERROR_INVALID_AUX_STAGE,
     HIP_COMPRESS_ERROR_HIP_RUNTIME,
+    HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE,
+    HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
 };
 
 struct hipCompressPlan;
@@ -30,9 +35,39 @@ hipCompressError_t hipCompressGetLastError(const hipCompressPlan* plan);
 const char* hipCompressErrorString(hipCompressError_t err);
 
 enum hipCompressKernel {
-    HIP_COMPRESS_KERNEL_ZLINE  = 0,  // parallel z-line RLE (per-block metadata)
-    HIP_COMPRESS_KERNEL_SEGRLE = 1,  // segment-aligned RLE (no metadata overhead)
+    HIP_COMPRESS_KERNEL_OCTREE   = 0,  // octree significance coder (3D only)
+    HIP_COMPRESS_KERNEL_QUADTREE = 1,  // quadtree significance coder (2D only) --
+                                       // the 2D counterpart of OCTREE.
+    HIP_COMPRESS_KERNEL_AUTO     = 2,  // dimensionality-selected default: QUADTREE
+                                       // for 2D and OCTREE for 3D.
 };
+
+// Which stage of the encode chain aux_stream picks up from. The chain is
+//
+//   transform -> encode -> scan -> compact -> D2H readback
+//
+// where "transform" is the fused wavelet + quantize + significance pass and
+// "encode" is the entropy coder (octree/quadtree significance + PFOR values).
+//
+// Transform never moves: it is bandwidth-bound and reads the caller's live
+// input buffer, so overlapping it only steals HBM from the caller.
+//
+// This is a placement knob, not a correctness one: all three settings produce
+// byte-identical output. It is also not a free win. Measured against a wave
+// propagation kernel that already saturates the GPU, FROM_ENCODE is 2-4% SLOWER
+// than NONE, because the entropy coder is a throughput kernel with no idle
+// slack to reclaim and co-residency costs more than the hiding saves. See
+// rtm_storage/hipcvx_overlap_findings.md, sections 3f and 3h. Profile your own
+// caller before moving off the default.
+typedef enum {
+    // aux_stream unused; the whole chain runs on user_stream.
+    HIP_COMPRESS_AUX_NONE = 0,
+    // Scan, compaction and the D2H readback run on aux_stream. Default.
+    HIP_COMPRESS_AUX_FROM_COMPACT = 1,
+    // Entropy coding onward runs on aux_stream (adds the encode stage and its
+    // size-alignment pass to the above).
+    HIP_COMPRESS_AUX_FROM_ENCODE = 2,
+} hipCompressAuxStage;
 
 struct hipCompressPlan {
     hipCompressKernel kernel;
@@ -48,20 +83,38 @@ struct hipCompressPlan {
     void* d_scan_temp;
     size_t scan_temp_bytes;
 
+    // Octree / quadtree kernels:
+    // d_octree_coded is the fixed-stride intermediate coded buffer.
+    // d_octree_sig_sizes is the per-block significance-size table.
+    // d_inv_scale is the device inv_scale published for stage-B decode.
+    unsigned char* d_octree_coded;
+    size_t* d_octree_sig_sizes;
+    float* d_inv_scale;
+
     double* d_partial_sums;
     int     max_copy_blocks;
     double* d_rms;
 
     hipStream_t aux_stream;
+    // Read fresh on every hipCompress call, so it may be changed between calls
+    // (but not while compress_pending is true) to move the split per snapshot.
+    hipCompressAuxStage aux_from;
     hipEvent_t  ready_event;
     size_t* h_staging;  // pinned host, 2 values: [offsets[nb-1], sizes[nb-1]]
 
+    // Stream the D2H readback of the pending compress was enqueued on, i.e. the
+    // one hipCompressSynchronize must block on. Equals aux_stream except at
+    // AUX_NONE, where the tail stays on the caller's user_stream and syncing
+    // aux_stream would return without waiting for anything.
+    hipStream_t pending_stream;
     bool compress_pending;  // true between hipCompress and hipCompressSynchronize
     mutable hipCompressError_t last_error;
 };
 
-// Round up to the next multiple of 32.
+// Round a positive dimension up to the next multiple of 32. Returns 0 when
+// the input is non-positive or the rounded result would overflow int.
 inline int hipCompressWaveletDim(int n) {
+    if (n <= 0 || n > INT_MAX - 31) return 0;
     return (n + 31) & ~31;
 }
 
@@ -75,14 +128,15 @@ inline void hipCompressWaveletDims(int wx, int wy, int wz,
 
 
 // Plan owns internal buffers and an event for stream bridging.
-// aux_stream: compact, entropy coding, D2H readback. User-owned, shareable
-// across plans. One plan must not be used concurrently from multiple host
-// threads. Compress is exclusive (writes plan buffers).
+// aux_stream runs the stages selected by aux_from. User-owned, shareable across
+// plans. One plan must not be used concurrently from multiple host threads.
+// Compress is exclusive (writes plan buffers).
 hipError_t hipCompressCreatePlan(
     hipCompressPlan** plan,
     int nx, int ny, int nz,
     hipStream_t aux_stream,
-    hipCompressKernel kernel = HIP_COMPRESS_KERNEL_ZLINE);
+    hipCompressKernel kernel = HIP_COMPRESS_KERNEL_AUTO,
+    hipCompressAuxStage aux_from = HIP_COMPRESS_AUX_FROM_COMPACT);
 
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 
@@ -134,17 +188,21 @@ hipError_t hipCopyFromWaveletLayout(
     hipCompressPlan* plan,
     hipStream_t user_stream);
 
-// Wavelet transform + quantize + RLE encode → self-contained compressed stream.
+// Wavelet transform + quantize + entropy encode → self-contained stream.
 // Fully async — returns immediately after queuing all GPU work.
-// d_input must be a wavelet-layout buffer (32-divisible dims matching plan).
+// d_input must be a wavelet-layout buffer (32-divisible dims matching plan)
+// containing finite float values.
 //
 // scale + d_rms control the quantization multiplier (mulfac):
 //   d_rms != NULL: mulfac = 1 / (rms * scale).  scale is the error tolerance;
 //                  smaller scale → finer quantization → lower error, lower CR.
 //   d_rms == NULL: mulfac = scale.  Caller supplies mulfac directly.
 //
-// Fused wavelet+RLE and scan run on user_stream.
-// Compact and D2H readback run on aux_stream (internal event bridge).
+// The fused wavelet + quantize + significance pass always runs on user_stream.
+// Which of the later stages run on aux_stream is set by plan->aux_from (see
+// hipCompressAuxStage); they are bridged across with an internal event. Passing
+// the same stream as both aux_stream and user_stream makes the split a no-op
+// regardless of aux_from.
 // Rejects with hipErrorNotReady if a previous compress has not been
 // synchronized via hipCompressSynchronize.
 // Call hipCompressSynchronize to retrieve compressed_length and CR.
@@ -165,9 +223,11 @@ hipError_t hipCompressSynchronize(
     long* compressed_length,
     float* compression_ratio);
 
-// RLE decode + inverse wavelet → wavelet-layout buffer.
+// Entropy decode + inverse wavelet → wavelet-layout buffer.
 // Reads the self-contained header (block offsets, mulfac) from d_input.
-// Single kernel launch on user_stream. No sync.
+// Enqueues two kernels on user_stream. No host sync. Calls on one plan are
+// ordered through an internal event because they share decode scratch.
+// d_input must point to a complete trusted stream produced by hipCompress.
 hipError_t hipDecompress(
     const unsigned char* d_input,
     float* d_output,

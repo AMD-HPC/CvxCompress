@@ -1,3 +1,7 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
+// Use of this source code is governed by an MIT-style license that can be
+// found in the LICENSE file or at https://opensource.org/licenses/MIT.
+
 // 2D compression round-trip test.
 // Tests hipCompress API with nz=1 (2D mode):
 //   1. Plan lifecycle with nz=1
@@ -9,6 +13,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <thread>
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "hipCompress.h"
@@ -31,6 +36,12 @@ __global__ void initSin2DKernel(float* data, int nx, int ny, float kx, float ky)
     float x = (float)ix / (float)nx;
     float y = (float)iy / (float)ny;
     data[idx] = sinf(kx * x) * sinf(ky * y);
+}
+
+__global__ void fillConstant2DKernel(float* data, int total, float value)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) data[idx] = value;
 }
 
 static float hostRMS(const float* data, int n)
@@ -156,6 +167,18 @@ static bool test_round_trip_2d()
     printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n", max_err, rms, rel_err);
 
     bool pass = (max_err < rms) && (cr > 1.0f);
+
+    const float direct_mulfac = 32.0f;
+    HIPCHECK(hipCompress(direct_mulfac, nullptr, d_input, d_compressed, plan, 0));
+    HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+    float stored_mulfac = 0.0f;
+    HIPCHECK(hipMemcpy(&stored_mulfac, plan->d_mulfac, sizeof(float),
+                       hipMemcpyDeviceToHost));
+    bool direct_ok = stored_mulfac == direct_mulfac;
+    printf("  direct scale: stored mulfac=%.1f: %s\n",
+           stored_mulfac, direct_ok ? "PASS" : "FAIL");
+
+    pass = pass && direct_ok;
     printf("  round-trip: %s\n", pass ? "PASS" : "FAIL");
 
     hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
@@ -331,6 +354,368 @@ static bool test_round_trip_with_copy_2d()
     return pass;
 }
 
+// 2D quadtree significance coder round-trip correctness.
+static bool test_quadtree_2d_round_trip()
+{
+    printf("Test 6: 2D quadtree codec round-trip\n");
+    const int NX = 256, NY = 256, total = NX * NY;
+    const float scale = 5e-2f;
+
+    hipCompressPlan* p_qt  = nullptr;
+    hipError_t err = hipCompressCreatePlan(&p_qt, NX, NY, 1, 0, HIP_COMPRESS_KERNEL_QUADTREE);
+    if (err != hipSuccess || !p_qt) {
+        printf("  FAIL: create quadtree plan: %s\n", hipGetErrorString(err));
+        return false;
+    }
+
+    // Quadtree must be rejected for 3D dims.
+    hipCompressPlan* p_bad = nullptr;
+    if (hipCompressCreatePlan(&p_bad, 64, 64, 64, 0, HIP_COMPRESS_KERNEL_QUADTREE) == hipSuccess) {
+        printf("  FAIL: quadtree accepted for 3D\n");
+        hipCompressDestroyPlan(p_bad);
+        return false;
+    }
+    printf("  reject quadtree for 3D: PASS\n");
+
+    float* d_input = nullptr;
+    float* d_out_qt = nullptr;
+    unsigned char* d_comp_qt = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out_qt, total * sizeof(float)));
+    size_t comp_qt = 0;
+    HIPCHECK(hipCompressMaxOutputSize(p_qt, &comp_qt));
+    HIPCHECK(hipMalloc(&d_comp_qt, comp_qt));
+
+    int threads = 256, blocks = (total + threads - 1) / threads;
+    initSin2DKernel<<<blocks, threads>>>(d_input, NX, NY, 24.0f, 24.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len_qt = 0;
+    float cr_qt = 0;
+    HIPCHECK(compressWithAutoRMS2D(scale, d_input, d_comp_qt,  &len_qt,  &cr_qt,  p_qt));
+    printf("  quadtree : CR=%.2f, %ld bytes\n", cr_qt, len_qt);
+
+    HIPCHECK(hipDecompress(d_comp_qt,  d_out_qt,  p_qt,  0));
+    HIPCHECK(hipDeviceSynchronize());
+
+    std::vector<float> h_in(total), h_qt(total);
+    HIPCHECK(hipMemcpy(h_in.data(),  d_input,   total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_qt.data(),  d_out_qt,  total * sizeof(float), hipMemcpyDeviceToHost));
+
+    float rms = hostRMS(h_in.data(), total);
+    float qt_err = maxAbsError(h_in.data(), h_qt.data(), total);
+    printf("  quadtree vs input: max_err=%.6e (rms=%.6e, rel=%.6e)\n", qt_err, rms, qt_err / rms);
+    bool pass = (qt_err < rms) && (cr_qt > 1.0f);
+    printf("  quadtree 2D: %s\n", pass ? "PASS" : "FAIL");
+
+    hipFree(d_input); hipFree(d_out_qt);
+    hipFree(d_comp_qt);
+    hipCompressDestroyPlan(p_qt);
+    return pass;
+}
+
+static bool test_scale_error_bound_2d()
+{
+    printf("Test 7: 2D scale behavior and error bound\n");
+    const float C = 10.0f;
+    struct Case { int nx, ny; float scale; } cases[] = {
+        {128, 128, 1e-1f},
+        {128, 128, 5e-2f},
+        {128, 128, 1e-2f},
+        {128, 128, 1e-3f},
+        {128,  96, 5e-2f},
+        {352, 416, 5e-2f},
+    };
+
+    bool pass = true;
+    float prev_err = 0.0f, prev_cr = 0.0f, prev_scale = 0.0f;
+    for (const auto& c : cases) {
+        int total = c.nx * c.ny;
+        hipCompressPlan* plan = nullptr;
+        HIPCHECK(hipCompressCreatePlan(
+            &plan, c.nx, c.ny, 1, 0, HIP_COMPRESS_KERNEL_QUADTREE));
+        float *d_input = nullptr, *d_output = nullptr;
+        unsigned char* d_comp = nullptr;
+        HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+        HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+        size_t maxout = 0;
+        HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+        HIPCHECK(hipMalloc(&d_comp, maxout));
+
+        initSin2DKernel<<<(total + 255) / 256, 256>>>(
+            d_input, c.nx, c.ny, 20.0f, 20.0f);
+        long len = 0; float cr = 0.0f;
+        HIPCHECK(compressWithAutoRMS2D(
+            c.scale, d_input, d_comp, &len, &cr, plan));
+        HIPCHECK(hipDecompress(d_comp, d_output, plan, 0));
+
+        std::vector<float> input(total), output(total);
+        HIPCHECK(hipMemcpy(input.data(), d_input, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        HIPCHECK(hipMemcpy(output.data(), d_output, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        float rms = hostRMS(input.data(), total);
+        float err = maxAbsError(input.data(), output.data(), total);
+        float bound = C * rms * c.scale;
+        bool ok = len > 0 && cr > 1.0f && err <= bound;
+        if (c.nx == 128 && c.ny == 128 && prev_scale > 0.0f) {
+            ok = ok && err <= prev_err && cr <= prev_cr;
+        }
+        printf("  %dx%d scale=%.0e: err=%.4e bound=%.4e CR=%.2f: %s\n",
+               c.nx, c.ny, c.scale, err, bound, cr,
+               ok ? "PASS" : "FAIL");
+        pass = pass && ok;
+        if (c.nx == 128 && c.ny == 128) {
+            prev_err = err; prev_cr = cr; prev_scale = c.scale;
+        }
+
+        HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output));
+        HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
+    }
+    return pass;
+}
+
+static bool test_edge_and_determinism_2d()
+{
+    printf("Test 8: 2D zero, near-zero, and deterministic output\n");
+    const int NX = 128, NY = 128, total = NX * NY;
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(
+        &plan, NX, NY, 1, 0, HIP_COMPRESS_KERNEL_QUADTREE));
+    float *d_input = nullptr, *d_output = nullptr;
+    unsigned char *d_comp1 = nullptr, *d_comp2 = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp1, maxout));
+    HIPCHECK(hipMalloc(&d_comp2, maxout));
+
+    bool pass = true;
+    const float values[] = {0.0f, 1e-30f};
+    for (float value : values) {
+        fillConstant2DKernel<<<(total + 255) / 256, 256>>>(
+            d_input, total, value);
+        long len = 0;
+        HIPCHECK(compressWithAutoRMS2D(
+            5e-2f, d_input, d_comp1, &len, nullptr, plan));
+        HIPCHECK(hipDecompress(d_comp1, d_output, plan, 0));
+        std::vector<float> output(total);
+        HIPCHECK(hipMemcpy(output.data(), d_output, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        float err = 0.0f;
+        for (float decoded : output)
+            err = fmaxf(err, fabsf(decoded - value));
+        bool ok = len > 0 && std::isfinite(err) &&
+                  err <= fmaxf(fabsf(value), 1e-35f);
+        printf("  value=%.1e: err=%.4e: %s\n",
+               value, err, ok ? "PASS" : "FAIL");
+        pass = pass && ok;
+    }
+
+    initSin2DKernel<<<(total + 255) / 256, 256>>>(
+        d_input, NX, NY, 20.0f, 20.0f);
+    HIPCHECK(hipMemset(d_comp1, 0xA5, maxout));
+    HIPCHECK(hipMemset(d_comp2, 0x5A, maxout));
+    long len1 = 0, len2 = 0;
+    HIPCHECK(compressWithAutoRMS2D(
+        5e-2f, d_input, d_comp1, &len1, nullptr, plan));
+    HIPCHECK(compressWithAutoRMS2D(
+        5e-2f, d_input, d_comp2, &len2, nullptr, plan));
+    std::vector<unsigned char> comp1(len1), comp2(len2);
+    HIPCHECK(hipMemcpy(comp1.data(), d_comp1, len1, hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(comp2.data(), d_comp2, len2, hipMemcpyDeviceToHost));
+    bool deterministic = len1 == len2 &&
+        memcmp(comp1.data(), comp2.data(), len1) == 0;
+    printf("  deterministic bytes: %s\n",
+           deterministic ? "PASS" : "FAIL");
+    pass = pass && deterministic;
+
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output));
+    HIPCHECK(hipFree(d_comp1)); HIPCHECK(hipFree(d_comp2));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    return pass;
+}
+
+static bool test_aux_stages_2d()
+{
+    printf("Test 9: 2D non-default streams and auxiliary stages\n");
+    const int NX = 128, NY = 128, total = NX * NY;
+    const hipCompressAuxStage stages[] = {
+        HIP_COMPRESS_AUX_NONE,
+        HIP_COMPRESS_AUX_FROM_COMPACT,
+        HIP_COMPRESS_AUX_FROM_ENCODE,
+    };
+    const char* names[] = {"none", "compact", "encode"};
+    bool pass = true;
+    long reference_len = 0;
+    std::vector<unsigned char> reference_comp;
+
+    for (int i = 0; i < 3; ++i) {
+        hipStream_t user, aux;
+        HIPCHECK(hipStreamCreate(&user));
+        HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+        hipCompressPlan* plan = nullptr;
+        HIPCHECK(hipCompressCreatePlan(
+            &plan, NX, NY, 1, aux, HIP_COMPRESS_KERNEL_QUADTREE, stages[i]));
+        float *d_input = nullptr, *d_output = nullptr;
+        unsigned char* d_comp = nullptr;
+        HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+        HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+        size_t maxout = 0;
+        HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+        HIPCHECK(hipMalloc(&d_comp, maxout));
+
+        initSin2DKernel<<<(total + 255) / 256, 256, 0, user>>>(
+            d_input, NX, NY, 20.0f, 20.0f);
+        long len = 0;
+        HIPCHECK(compressWithAutoRMS2D(
+            5e-2f, d_input, d_comp, &len, nullptr, plan, user));
+        HIPCHECK(hipDecompress(d_comp, d_output, plan, user));
+        HIPCHECK(hipStreamSynchronize(user));
+        std::vector<float> input(total), output(total);
+        HIPCHECK(hipMemcpy(input.data(), d_input, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        HIPCHECK(hipMemcpy(output.data(), d_output, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        float rms = hostRMS(input.data(), total);
+        float err = maxAbsError(input.data(), output.data(), total);
+        bool ok = len > 0 && err < rms;
+        std::vector<unsigned char> compressed(len);
+        HIPCHECK(hipMemcpy(compressed.data(), d_comp, len,
+                           hipMemcpyDeviceToHost));
+        if (i == 0) {
+            reference_len = len;
+            reference_comp = compressed;
+        } else {
+            ok = ok && len == reference_len &&
+                 memcmp(compressed.data(), reference_comp.data(), len) == 0;
+        }
+        printf("  aux=%s: err=%.4e bytes-identical=%s: %s\n",
+               names[i], err, i == 0 ? "reference" : (ok ? "yes" : "no"),
+               ok ? "PASS" : "FAIL");
+        pass = pass && ok;
+
+        HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output));
+        HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
+        HIPCHECK(hipStreamDestroy(aux)); HIPCHECK(hipStreamDestroy(user));
+    }
+    return pass;
+}
+
+static bool test_concurrent_decode_2d()
+{
+    printf("Test 10: 2D same-plan cross-stream decode\n");
+    const int NX = 128, NY = 128, total = NX * NY;
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(
+        &plan, NX, NY, 1, 0, HIP_COMPRESS_KERNEL_QUADTREE));
+    hipStream_t s1, s2, s3;
+    HIPCHECK(hipStreamCreate(&s1));
+    HIPCHECK(hipStreamCreate(&s2));
+    HIPCHECK(hipStreamCreate(&s3));
+    float *d_input = nullptr, *d_out1 = nullptr;
+    float *d_out2 = nullptr, *d_out3 = nullptr;
+    unsigned char* d_comp = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out1, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out2, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out3, total * sizeof(float)));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp, maxout));
+
+    initSin2DKernel<<<(total + 255) / 256, 256>>>(
+        d_input, NX, NY, 20.0f, 20.0f);
+    HIPCHECK(compressWithAutoRMS2D(
+        5e-2f, d_input, d_comp, nullptr, nullptr, plan));
+    HIPCHECK(hipDecompress(d_comp, d_out1, plan, s1));
+    HIPCHECK(hipDecompress(d_comp, d_out2, plan, s2));
+    HIPCHECK(hipDecompress(d_comp, d_out3, plan, s3));
+    HIPCHECK(hipStreamSynchronize(s1));
+    HIPCHECK(hipStreamSynchronize(s2));
+    HIPCHECK(hipStreamSynchronize(s3));
+
+    std::vector<float> input(total), out1(total), out2(total), out3(total);
+    HIPCHECK(hipMemcpy(input.data(), d_input, total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out1.data(), d_out1, total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out2.data(), d_out2, total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out3.data(), d_out3, total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    float rms = hostRMS(input.data(), total);
+    float err = maxAbsError(input.data(), out1.data(), total);
+    bool pass = err < rms &&
+                memcmp(out1.data(), out2.data(), total * sizeof(float)) == 0 &&
+                memcmp(out1.data(), out3.data(), total * sizeof(float)) == 0;
+    printf("  three outputs bit-identical, err=%.4e: %s\n",
+           err, pass ? "PASS" : "FAIL");
+
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_out1));
+    HIPCHECK(hipFree(d_out2)); HIPCHECK(hipFree(d_out3));
+    HIPCHECK(hipFree(d_comp)); HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(s1)); HIPCHECK(hipStreamDestroy(s2));
+    HIPCHECK(hipStreamDestroy(s3));
+    return pass;
+}
+
+static bool test_multithread_plans_2d()
+{
+    printf("Test 11: 2D separate plans from host threads\n");
+    const int NX = 128, NY = 128, total = NX * NY;
+    struct Result { float err; float rms; bool ok; };
+
+    auto worker = [&](float k, Result* result) {
+        hipStream_t user, aux;
+        HIPCHECK(hipStreamCreate(&user));
+        HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+        hipCompressPlan* plan = nullptr;
+        HIPCHECK(hipCompressCreatePlan(
+            &plan, NX, NY, 1, aux, HIP_COMPRESS_KERNEL_QUADTREE));
+        float *d_input = nullptr, *d_output = nullptr;
+        unsigned char* d_comp = nullptr;
+        HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+        HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+        size_t maxout = 0;
+        HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+        HIPCHECK(hipMalloc(&d_comp, maxout));
+
+        initSin2DKernel<<<(total + 255) / 256, 256, 0, user>>>(
+            d_input, NX, NY, k, k);
+        long len = 0; float cr = 0.0f;
+        HIPCHECK(compressWithAutoRMS2D(
+            5e-2f, d_input, d_comp, &len, &cr, plan, user));
+        HIPCHECK(hipDecompress(d_comp, d_output, plan, user));
+        HIPCHECK(hipStreamSynchronize(user));
+        std::vector<float> input(total), output(total);
+        HIPCHECK(hipMemcpy(input.data(), d_input, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        HIPCHECK(hipMemcpy(output.data(), d_output, total * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        result->rms = hostRMS(input.data(), total);
+        result->err = maxAbsError(input.data(), output.data(), total);
+        result->ok = len > 0 && cr > 1.0f && result->err < result->rms;
+
+        HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output));
+        HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
+        HIPCHECK(hipStreamDestroy(aux)); HIPCHECK(hipStreamDestroy(user));
+    };
+
+    Result r1{}, r2{};
+    std::thread t1(worker, 20.0f, &r1);
+    std::thread t2(worker, 40.0f, &r2);
+    t1.join(); t2.join();
+    bool pass = r1.ok && r2.ok;
+    printf("  err1=%.4e err2=%.4e: %s\n",
+           r1.err, r2.err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 int main()
 {
     printf("=== 2D Compression Tests ===\n\n");
@@ -347,6 +732,18 @@ int main()
     total++; if (test_copy_to_from_2d()) passed++;
     printf("\n");
     total++; if (test_round_trip_with_copy_2d()) passed++;
+    printf("\n");
+    total++; if (test_quadtree_2d_round_trip()) passed++;
+    printf("\n");
+    total++; if (test_scale_error_bound_2d()) passed++;
+    printf("\n");
+    total++; if (test_edge_and_determinism_2d()) passed++;
+    printf("\n");
+    total++; if (test_aux_stages_2d()) passed++;
+    printf("\n");
+    total++; if (test_concurrent_decode_2d()) passed++;
+    printf("\n");
+    total++; if (test_multithread_plans_2d()) passed++;
     printf("\n");
 
     printf("=== Results: %d/%d passed ===\n", passed, total);

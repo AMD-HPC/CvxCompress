@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -67,7 +67,7 @@ __device__ inline void ds79_forward_f4(float4_vec* data, int dim) {
 
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferKernel(
+__global__ void hipcvx_waveletBufferKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -119,7 +119,7 @@ hipError_t hipWaveletTransformBuffer(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -130,7 +130,7 @@ hipError_t hipWaveletTransformBuffer(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBaselineKernel(
+__global__ void hipcvx_waveletBaselineKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -174,7 +174,7 @@ hipError_t hipWaveletTransformBaseline(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBaselineKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBaselineKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -201,7 +201,7 @@ void saddr_store_nt(float* base, uint32_t byte_off, float4_vec val) {
 
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrKernel(
+__global__ void hipcvx_waveletSaddrKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -241,7 +241,7 @@ hipError_t hipWaveletTransformSaddr(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -251,7 +251,7 @@ hipError_t hipWaveletTransformSaddr(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletScalarNTBaselineKernel(
+__global__ void hipcvx_waveletScalarNTBaselineKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -300,7 +300,7 @@ hipError_t hipWaveletTransformScalarNTBaseline(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletScalarNTBaselineKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletScalarNTBaselineKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -311,7 +311,7 @@ hipError_t hipWaveletTransformScalarNTBaseline(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletScalarBaselineKernel(
+__global__ void hipcvx_waveletScalarBaselineKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -360,7 +360,7 @@ hipError_t hipWaveletTransformScalarBaseline(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletScalarBaselineKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletScalarBaselineKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -373,7 +373,7 @@ hipError_t hipWaveletTransformScalarBaseline(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferZKernel(
+__global__ void hipcvx_waveletBufferZKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -419,7 +419,7 @@ hipError_t hipWaveletTransformBufferZ(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferZKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferZKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -431,7 +431,7 @@ hipError_t hipWaveletTransformBufferZ(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferZScalarTmpKernel(
+__global__ void hipcvx_waveletBufferZScalarTmpKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -477,7 +477,7 @@ hipError_t hipWaveletTransformBufferZScalarTmp(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferZScalarTmpKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferZScalarTmpKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -489,7 +489,7 @@ hipError_t hipWaveletTransformBufferZScalarTmp(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferZYKernel(
+__global__ void hipcvx_waveletBufferZYKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -575,7 +575,7 @@ hipError_t hipWaveletTransformBufferZY(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferZYKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferZYKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -586,7 +586,7 @@ hipError_t hipWaveletTransformBufferZY(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrZKernel(
+__global__ void hipcvx_waveletSaddrZKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -624,7 +624,7 @@ hipError_t hipWaveletTransformSaddrZ(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrZKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrZKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -634,7 +634,7 @@ hipError_t hipWaveletTransformSaddrZ(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrZScalarTmpKernel(
+__global__ void hipcvx_waveletSaddrZScalarTmpKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -672,7 +672,7 @@ hipError_t hipWaveletTransformSaddrZScalarTmp(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrZScalarTmpKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrZScalarTmpKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -684,7 +684,7 @@ hipError_t hipWaveletTransformSaddrZScalarTmp(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrZYKernel(
+__global__ void hipcvx_waveletSaddrZYKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -766,7 +766,7 @@ hipError_t hipWaveletTransformSaddrZY(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrZYKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrZYKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -777,7 +777,7 @@ hipError_t hipWaveletTransformSaddrZY(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferZYXorKernel(
+__global__ void hipcvx_waveletBufferZYXorKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -865,7 +865,7 @@ hipError_t hipWaveletTransformBufferZYXor(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferZYXorKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferZYXorKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -875,7 +875,7 @@ hipError_t hipWaveletTransformBufferZYXor(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrZYXorKernel(
+__global__ void hipcvx_waveletSaddrZYXorKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -955,7 +955,7 @@ hipError_t hipWaveletTransformSaddrZYXor(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrZYXorKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrZYXorKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -972,7 +972,7 @@ int xor4_idx(int x, int y) {
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferZYXor4Kernel(
+__global__ void hipcvx_waveletBufferZYXor4Kernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -1060,7 +1060,7 @@ hipError_t hipWaveletTransformBufferZYXor4(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferZYXor4Kernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferZYXor4Kernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -1070,7 +1070,7 @@ hipError_t hipWaveletTransformBufferZYXor4(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrZYXor4Kernel(
+__global__ void hipcvx_waveletSaddrZYXor4Kernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -1150,7 +1150,7 @@ hipError_t hipWaveletTransformSaddrZYXor4(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrZYXor4Kernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrZYXor4Kernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -1163,7 +1163,7 @@ hipError_t hipWaveletTransformSaddrZYXor4(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferZYXKernel(
+__global__ void hipcvx_waveletBufferZYXKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -1265,7 +1265,7 @@ hipError_t hipWaveletTransformBufferZYX(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferZYXKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferZYXKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -1275,7 +1275,7 @@ hipError_t hipWaveletTransformBufferZYX(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrZYXKernel(
+__global__ void hipcvx_waveletSaddrZYXKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -1365,7 +1365,7 @@ hipError_t hipWaveletTransformSaddrZYX(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrZYXKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrZYXKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -1428,7 +1428,7 @@ void pipe_gather_xor(float4_vec* batch, float* lds, int xg, int yr) {
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletBufferPipeXYZKernel(
+__global__ void hipcvx_waveletBufferPipeXYZKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -1524,7 +1524,7 @@ hipError_t hipWaveletTransformBufferPipeXYZ(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletBufferPipeXYZKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletBufferPipeXYZKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
@@ -1534,7 +1534,7 @@ hipError_t hipWaveletTransformBufferPipeXYZ(
 // ---------------------------------------------------------------------------
 template<int T, int TargetOcc>
 __launch_bounds__(T, TargetOcc)
-__global__ void waveletSaddrPipeXYZKernel(
+__global__ void hipcvx_waveletSaddrPipeXYZKernel(
     float* __restrict__ data,
     int ldimx,
     int ldimxy)
@@ -1616,71 +1616,71 @@ hipError_t hipWaveletTransformSaddrPipeXYZ(
 {
     dim3 block(T);
     dim3 grid(nx / bx, ny / by, nz / bz);
-    hipLaunchKernelGGL((waveletSaddrPipeXYZKernel<T, TargetOcc>),
+    hipLaunchKernelGGL((hipcvx_waveletSaddrPipeXYZKernel<T, TargetOcc>),
                        grid, block, 0, 0, data, ldimx, ldimxy);
     return hipGetLastError();
 }
 
 // Explicit instantiations
-template __global__ void waveletBufferKernel<256, 3>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferKernel<256, 3>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBuffer<256, 3>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBaselineKernel<256, 3>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBaselineKernel<256, 3>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBaseline<256, 3>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletScalarBaselineKernel<256, 3>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletScalarBaselineKernel<256, 3>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformScalarBaseline<256, 3>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletScalarNTBaselineKernel<256, 3>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletScalarNTBaselineKernel<256, 3>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformScalarNTBaseline<256, 3>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrKernel<256, 3>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrKernel<256, 3>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddr<256, 3>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferZKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferZKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferZ<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferZScalarTmpKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferZScalarTmpKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferZScalarTmp<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrZKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrZKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrZ<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrZScalarTmpKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrZScalarTmpKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrZScalarTmp<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferZYKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferZYKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferZY<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrZYKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrZYKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrZY<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferZYXorKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferZYXorKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferZYXor<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrZYXorKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrZYXorKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrZYXor<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferZYXor4Kernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferZYXor4Kernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferZYXor4<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrZYXor4Kernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrZYXor4Kernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrZYXor4<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferZYXKernel<256, 2>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferZYXKernel<256, 2>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferZYX<256, 2>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrZYXKernel<256, 2>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrZYXKernel<256, 2>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrZYX<256, 2>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferPipeXYZKernel<256, 2>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferPipeXYZKernel<256, 2>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferPipeXYZ<256, 2>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrPipeXYZKernel<256, 2>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrPipeXYZKernel<256, 2>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrPipeXYZ<256, 2>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletBufferPipeXYZKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletBufferPipeXYZKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformBufferPipeXYZ<256, 1>(float*, int, int, int, int, int, int, int, int);
 
-template __global__ void waveletSaddrPipeXYZKernel<256, 1>(float* __restrict__, int, int);
+template __global__ void hipcvx_waveletSaddrPipeXYZKernel<256, 1>(float* __restrict__, int, int);
 template hipError_t hipWaveletTransformSaddrPipeXYZ<256, 1>(float*, int, int, int, int, int, int, int, int);

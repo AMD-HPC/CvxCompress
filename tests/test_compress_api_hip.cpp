@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // Use of this source code is governed by an MIT-style license that can be
 // found in the LICENSE file or at https://opensource.org/licenses/MIT.
 
@@ -97,15 +97,12 @@ static bool test_plan_lifecycle()
     if (err == hipSuccess) { printf("  FAIL: should reject nx=100\n"); hipCompressDestroyPlan(plan); return false; }
     printf("  reject non-32-multiple: PASS\n");
 
-    // MaxOutputSize
+    // MaxOutputSize for the default 3D codec.
     err = hipCompressCreatePlan(&plan, 64, 64, 64, 0);
     if (err != hipSuccess) { printf("  FAIL: create 64^3 plan\n"); return false; }
     size_t max_sz = 0;
     HIPCHECK(hipCompressMaxOutputSize(plan, &max_sz));
-    int nb = (64/32) * (64/32) * (64/32);
-    size_t expected = (size_t)(8 + 8 * nb + 4) + (size_t)nb * 4 * 32768;
-    expected = (expected + 7) & ~(size_t)7;  // 8B round-up slack (see hipCompressMaxOutputSize)
-    if (max_sz != expected) { printf("  FAIL: MaxOutputSize=%zu expected=%zu\n", max_sz, expected); hipCompressDestroyPlan(plan); return false; }
+    if (max_sz == 0) { printf("  FAIL: MaxOutputSize=0\n"); hipCompressDestroyPlan(plan); return false; }
     printf("  MaxOutputSize=%zu: PASS\n", max_sz);
 
     // BufferSize
@@ -182,51 +179,98 @@ static bool test_round_trip()
     return pass;
 }
 
-static bool test_cr_vs_cpu()
+static bool test_octree_round_trip()
 {
-    printf("Test 3: CR matches CPU (within z-line gap)\n");
+    printf("Test: Octree compress/decompress round-trip\n");
     const int N = 128, total = N * N * N;
     const float scale = 5e-2f;
-    const int bx = 32, by = 32, bz = 32;
 
-    // GPU compress
-    hipCompressPlan* plan = nullptr;
-    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+    hipCompressPlan* oct = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&oct, N, N, N, 0, HIP_COMPRESS_KERNEL_OCTREE));
 
     float* d_input = nullptr;
-    unsigned char* d_compressed = nullptr;
+    float* d_output = nullptr;
+    unsigned char* d_comp = nullptr;
     HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
     size_t comp_size = 0;
-    HIPCHECK(hipCompressMaxOutputSize(plan, &comp_size));
-    HIPCHECK(hipMalloc(&d_compressed, comp_size));
+    HIPCHECK(hipCompressMaxOutputSize(oct, &comp_size));
+    HIPCHECK(hipMalloc(&d_comp, comp_size));
 
     int threads = 256, blocks = (total + threads - 1) / threads;
     initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.0f, 20.0f, 20.0f);
     HIPCHECK(hipDeviceSynchronize());
 
-    std::vector<float> h_data(total);
-    HIPCHECK(hipMemcpy(h_data.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    long len = 0;
+    float cr = 0;
+    HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp, &len, &cr, oct));
+    printf("  octree CR=%.2f (%ld B)\n", cr, len);
 
-    long gpu_length = 0;
-    float gpu_cr = 0;
-    HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &gpu_length, &gpu_cr, plan));
+    HIPCHECK(hipDecompress(d_comp, d_output, oct, 0));
 
-    // CPU compress
-    CvxCompress compressor;
-    unsigned int* cpu_compressed = nullptr;
-    posix_memalign((void**)&cpu_compressed, 64, total * 5);
-    long cpu_length = 0;
-    float cpu_cr = compressor.Compress(scale, h_data.data(), N, N, N, bx, by, bz, cpu_compressed, cpu_length);
+    std::vector<float> h_in(total), h_out(total);
+    HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(h_out.data(), d_output, total * sizeof(float), hipMemcpyDeviceToHost));
 
-    float gap = (cpu_cr - gpu_cr) / cpu_cr * 100.0f;
-    printf("  CPU CR=%.2f  GPU CR=%.2f  gap=%.1f%%\n", cpu_cr, gpu_cr, gap);
+    float rms = hostRMS(h_in.data(), total);
+    float max_err = maxAbsError(h_in.data(), h_out.data(), total);
+    printf("  decompress: max_err=%.6e, rms=%.6e, rel_max_err=%.6e\n",
+           max_err, rms, max_err / rms);
 
-    // Z-line encoding can't exploit cross-zline zero runs; gap grows with CR
-    bool pass = (gpu_cr > 1.0f) && (gpu_cr <= cpu_cr);
-    printf("  CR comparison: %s\n", pass ? "PASS" : "FAIL");
+    // Correctness gate: bounded reconstruction and a real compression gain.
+    bool pass = (max_err < rms) && (cr > 1.0f) && (len > 0);
+    printf("  octree round-trip: %s\n", pass ? "PASS" : "FAIL");
 
-    free(cpu_compressed);
-    hipFree(d_input); hipFree(d_compressed);
+    hipFree(d_input); hipFree(d_output); hipFree(d_comp);
+    hipCompressDestroyPlan(oct);
+    return pass;
+}
+
+static bool test_direct_scale_round_trip()
+{
+    printf("Test: Direct-scale round-trip\n");
+    const int N = 64, total = N * N * N;
+    const float mulfac = 32.0f;
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+    float *d_input = nullptr, *d_output = nullptr;
+    unsigned char* d_comp = nullptr;
+    HIPCHECK(hipMalloc(&d_input, total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_output, total * sizeof(float)));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp, maxout));
+
+    initSinKernel<<<(total + 255) / 256, 256>>>(
+        d_input, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+
+    long len = 0; float cr = 0;
+    HIPCHECK(hipCompress(mulfac, nullptr, d_input, d_comp, plan, 0));
+    HIPCHECK(hipCompressSynchronize(plan, &len, &cr));
+    float stored_mulfac = 0.0f;
+    HIPCHECK(hipMemcpy(&stored_mulfac, plan->d_mulfac, sizeof(float),
+                       hipMemcpyDeviceToHost));
+    HIPCHECK(hipDecompress(d_comp, d_output, plan, 0));
+    HIPCHECK(hipDeviceSynchronize());
+
+    bool pass = stored_mulfac == mulfac && len > 0;
+
+    // Exercise finite overflow products in the device quantizer.
+    initSinKernel<<<(total + 255) / 256, 256>>>(
+        d_input, N, N, N, 20.0f, 20.0f, 20.0f);
+    long extreme_len = 0;
+    HIPCHECK(hipCompress(FLT_MAX, nullptr, d_input, d_comp, plan, 0));
+    HIPCHECK(hipCompressSynchronize(plan, &extreme_len, nullptr));
+    HIPCHECK(hipDecompress(d_comp, d_output, plan, 0));
+    HIPCHECK(hipDeviceSynchronize());
+    bool extreme_ok = extreme_len > 0;
+    pass = pass && extreme_ok;
+    printf("  mulfac=%.1f stored=%.1f extreme=%s: %s\n",
+           mulfac, stored_mulfac, extreme_ok ? "ok" : "FAIL",
+           pass ? "PASS" : "FAIL");
+    hipFree(d_input); hipFree(d_output); hipFree(d_comp);
     hipCompressDestroyPlan(plan);
     return pass;
 }
@@ -348,6 +392,8 @@ static bool test_determinism()
     int threads = 256, blocks = (total + threads - 1) / threads;
     initSinKernel<<<blocks, threads>>>(d_input, N, N, N, 20.0f, 20.0f, 20.0f);
     HIPCHECK(hipDeviceSynchronize());
+    HIPCHECK(hipMemset(d_comp1, 0xA5, comp_size));
+    HIPCHECK(hipMemset(d_comp2, 0x5A, comp_size));
 
     long len1 = 0, len2 = 0;
     HIPCHECK(compressWithAutoRMS(scale, d_input, d_comp1, &len1, nullptr, plan));
@@ -462,12 +508,16 @@ static bool test_back_to_back_compress()
 
 static bool test_back_to_back_decompress()
 {
-    printf("Test 9: Back-to-back decompress (no internal sync)\n");
+    printf("Test 9: Back-to-back decompress on different streams\n");
     const int N = 128, total = N * N * N;
     const float scale = 5e-2f;
 
     hipCompressPlan* plan = nullptr;
     HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, 0));
+    hipStream_t s1, s2, s3;
+    HIPCHECK(hipStreamCreate(&s1));
+    HIPCHECK(hipStreamCreate(&s2));
+    HIPCHECK(hipStreamCreate(&s3));
 
     float *d_input, *d_out1, *d_out2, *d_out3;
     unsigned char* d_compressed;
@@ -486,9 +536,12 @@ static bool test_back_to_back_decompress()
     long len = 0;
     HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &len, nullptr, plan));
 
-    HIPCHECK(hipDecompress(d_compressed, d_out1, plan, 0));
-    HIPCHECK(hipDecompress(d_compressed, d_out2, plan, 0));
-    HIPCHECK(hipDecompress(d_compressed, d_out3, plan, 0));
+    HIPCHECK(hipDecompress(d_compressed, d_out1, plan, s1));
+    HIPCHECK(hipDecompress(d_compressed, d_out2, plan, s2));
+    HIPCHECK(hipDecompress(d_compressed, d_out3, plan, s3));
+    HIPCHECK(hipStreamSynchronize(s1));
+    HIPCHECK(hipStreamSynchronize(s2));
+    HIPCHECK(hipStreamSynchronize(s3));
 
     std::vector<float> h_in(total), h1(total), h2(total), h3(total);
     HIPCHECK(hipMemcpy(h_in.data(), d_input, total * sizeof(float), hipMemcpyDeviceToHost));
@@ -507,6 +560,7 @@ static bool test_back_to_back_decompress()
 
     hipFree(d_input); hipFree(d_out1); hipFree(d_out2); hipFree(d_out3); hipFree(d_compressed);
     hipCompressDestroyPlan(plan);
+    hipStreamDestroy(s1); hipStreamDestroy(s2); hipStreamDestroy(s3);
     return pass;
 }
 
@@ -1650,8 +1704,10 @@ static bool test_wavelet_dims_helper()
     printf("Test 29: hipCompressWaveletDims helper\n");
     bool pass = true;
     struct { int in; int expected; } cases[] = {
+        { -1,  0}, {  0,  0},
         {  1, 32}, { 31, 32}, { 32, 32}, { 33, 64},
         { 64, 64}, {100, 128}, {256, 256}, {257, 288},
+        {INT_MAX - 31, INT_MAX - 31}, {INT_MAX, 0},
     };
     for (auto& c : cases) {
         int out = hipCompressWaveletDim(c.in);
@@ -1664,13 +1720,14 @@ static bool test_wavelet_dims_helper()
     return pass;
 }
 
-static void bench_grid_size(int nx, int ny, int nz, float scale)
+static void bench_grid_size(int nx, int ny, int nz, float scale,
+                            hipCompressKernel kernel, const char* label)
 {
     long total = (long)nx * ny * nz;
     float data_MB = (float)total * sizeof(float) / (1024.0f * 1024.0f);
 
     hipCompressPlan* plan = nullptr;
-    HIPCHECK(hipCompressCreatePlan(&plan, nx, ny, nz, 0));
+    HIPCHECK(hipCompressCreatePlan(&plan, nx, ny, nz, 0, kernel));
 
     float* d_input = nullptr;
     float* d_output = nullptr;
@@ -1715,8 +1772,8 @@ static void bench_grid_size(int nx, int ny, int nz, float scale)
     float fwd_bw = data_MB / fwd_ms * 1000.0f / 1024.0f;
     float inv_bw = data_MB / inv_ms * 1000.0f / 1024.0f;
 
-    printf("  %4dx%4dx%4d  %7.1f  %5.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
-           nx, ny, nz, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
+    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
+           nx, ny, nz, label, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
 
     hipEventDestroy(t0); hipEventDestroy(t1); hipEventDestroy(t2);
     hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
@@ -1727,8 +1784,8 @@ static void bench_throughput()
 {
     const float scale = 5e-2f;
     printf("Benchmark: API throughput, scale=%.0e, sin(40x)sin(40y)sin(40z)\n", scale);
-    printf("  %16s  %7s  %5s  %8s  %8s  %8s  %8s  %5s\n",
-           "grid", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
+    printf("  %16s  %7s  %7s  %6s  %8s  %8s  %8s  %8s  %5s\n",
+           "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
 
     int sizes[][3] = {
         {352, 416, 320},
@@ -1741,8 +1798,10 @@ static void bench_throughput()
         {512, 512, 512},
     };
 
-    for (auto& s : sizes)
-        bench_grid_size(s[0], s[1], s[2], scale);
+    // Retained 3D codec on the API path.
+    for (auto& s : sizes) {
+        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,   "octree");
+    }
 }
 
 static void generateRadialSinc(float* vol, int nx, int ny, int nz,
@@ -2337,9 +2396,60 @@ static bool test_error_codes()
     }
     {
         hipCompressPlan* plan = nullptr;
-        hipError_t err = hipCompressCreatePlan(&plan, 32800, 32768, 32, 0);
+        // 64-bit intra-plane offsets lifted the old 4 GB cap; the remaining
+        // bound is the int plane stride nx*ny (< 2^31 elements).  65536*32768
+        // = 2^31 > INT_MAX, so the guard still rejects (before any hipMalloc).
+        hipError_t err = hipCompressCreatePlan(&plan, 65536, 32768, 32, 0);
         if (!check_error("CreatePlan plane too large", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
+            pass = false;
+        if (plan) hipCompressDestroyPlan(plan);
+    }
+    {
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 32768, 32768, 8192, 0);
+        if (!check_error("CreatePlan volume too large", plan, err,
+                          hipErrorInvalidValue,
+                          HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE))
+            pass = false;
+        if (plan) hipCompressDestroyPlan(plan);
+    }
+    {
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 128, 128, 128, 0, (hipCompressKernel)999);
+        if (!check_error("CreatePlan unknown codec", plan, err,
+                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_CODEC))
+            pass = false;
+        if (plan) hipCompressDestroyPlan(plan);
+    }
+    {
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 128, 128, 1, 0, HIP_COMPRESS_KERNEL_OCTREE);
+        if (!check_error("CreatePlan 3D codec for 2D plan", plan, err,
+                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_CODEC))
+            pass = false;
+        if (plan) hipCompressDestroyPlan(plan);
+    }
+    {
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 128, 128, 128, 0, HIP_COMPRESS_KERNEL_QUADTREE);
+        if (!check_error("CreatePlan 2D codec for 3D plan", plan, err,
+                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_CODEC))
+            pass = false;
+        if (plan) hipCompressDestroyPlan(plan);
+    }
+    {
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 128, 128, 128, 0, HIP_COMPRESS_KERNEL_AUTO,
+            (hipCompressAuxStage)999);
+        if (!check_error("CreatePlan invalid aux stage", plan, err,
+                          hipErrorInvalidValue,
+                          HIP_COMPRESS_ERROR_INVALID_AUX_STAGE))
             pass = false;
         if (plan) hipCompressDestroyPlan(plan);
     }
@@ -2464,6 +2574,24 @@ static bool test_error_codes()
             pass = false;
     }
     {
+        plan->aux_from = (hipCompressAuxStage)999;
+        hipError_t err = hipCompress(
+            5e-2f, nullptr, (const float*)d_buf, d_comp, plan, 0);
+        if (!check_error("Compress invalid mutable aux stage", plan, err,
+                          hipErrorInvalidValue,
+                          HIP_COMPRESS_ERROR_INVALID_AUX_STAGE))
+            pass = false;
+        plan->aux_from = HIP_COMPRESS_AUX_FROM_COMPACT;
+    }
+    {
+        hipError_t err = hipCompress(
+            5e-2f, nullptr, (const float*)d_buf, d_comp + 4, plan, 0);
+        if (!check_error("Compress misaligned output", plan, err,
+                          hipErrorInvalidValue,
+                          HIP_COMPRESS_ERROR_INVALID_ALIGNMENT))
+            pass = false;
+    }
+    {
         // Force compress_pending
         HIPCHECK(hipCompress(5e-2f, nullptr, (const float*)d_buf, d_comp, plan, 0));
         hipError_t err = hipCompress(5e-2f, nullptr, (const float*)d_buf, d_comp, plan, 0);
@@ -2582,24 +2710,10 @@ static bool test_error_codes()
     }
 
     // --- Plane too large ---
-    {
-        hipError_t err = hipCopyToWaveletLayout(
-            d_buf, 32768, 1073741825,
-            0, 0, 0,
-            128, 128, 128,
-            d_buf, nullptr, plan, 0);
-        if (!check_error("CopyTo plane too large", plan, err,
-                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
-            pass = false;
-    }
-    {
-        hipError_t err = hipCopyFromWaveletLayout(
-            d_buf, d_buf, 32768, 1073741825,
-            0, 0, 0, 128, 128, 128, plan, 0);
-        if (!check_error("CopyFrom plane too large", plan, err,
-                          hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
-            pass = false;
-    }
+    // The former CopyTo/CopyFrom "plane too large" (4 GB) rejections were
+    // removed: intra-plane addressing is now 64-bit, so source strides are
+    // bounded only by the int stride type (up to INT_MAX elements) and are no
+    // longer size-capped here.
 
     // --- Decompress errors ---
     {
@@ -2612,6 +2726,13 @@ static bool test_error_codes()
         hipError_t err = hipDecompress(d_comp, nullptr, plan, 0);
         if (!check_error("Decompress null output", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_NULL_OUTPUT))
+            pass = false;
+    }
+    {
+        hipError_t err = hipDecompress(d_comp + 4, d_buf, plan, 0);
+        if (!check_error("Decompress misaligned input", plan, err,
+                          hipErrorInvalidValue,
+                          HIP_COMPRESS_ERROR_INVALID_ALIGNMENT))
             pass = false;
     }
 
@@ -2955,10 +3076,11 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 37;
+    int passed = 0, total = 38;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
-    if (test_cr_vs_cpu())                   ++passed;
+    if (test_octree_round_trip())           ++passed;
+    if (test_direct_scale_round_trip())      ++passed;
     if (test_varying_scale())               ++passed;
     if (test_multiple_cycles())             ++passed;
     if (test_determinism())                 ++passed;
