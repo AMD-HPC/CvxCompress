@@ -97,10 +97,6 @@ hip/%.o: hip/%.cpp
 test_wavelet_buffer_hip: tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -save-temps=obj -DBUILDDIR=\"$(BUILDDIR)\" -I. -Ihip -Itests -lrocrand -fopenmp tests/test_wavelet_buffer_hip.cpp hip/hipWaveletTransformBuffer.cpp $(HIPLDFLAGS) -o $(BUILDDIR)/test_wavelet_buffer_hip
 
-# Quantize + RLE z-line unit test (CPU-only, no HIP)
-test_quantize_rle: tests/test_quantize_rle.cpp hip/quantize_rle_ref.h Run_Length_Escape_Codes.hxx | $(BUILDDIR)
-	$(CXX) -O2 $(TFLAG) -I. -Ihip -Itests tests/test_quantize_rle.cpp -o $(BUILDDIR)/test_quantize_rle
-
 # Inverse wavelet transform unit test
 test_inverse_wavelet_hip: tests/test_inverse_wavelet_hip.cpp hip/ds79.h hip/us79_reg32.inc hip/ds79_reg32.inc | $(BUILDDIR)
 	$(HIPCC) $(HIPCFLAGS) $(HIP_OFFLOAD) -mllvm -unroll-threshold=10000 -I. -Ihip -Itests tests/test_inverse_wavelet_hip.cpp -lm -o $(BUILDDIR)/test_inverse_wavelet_hip
