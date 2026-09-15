@@ -4,7 +4,6 @@
 
 #include "hipCompress.h"
 
-#define DS79_INCLUDE_REG32
 #include "hipCompact.h"
 #include "hipWaveletBitmap.h"
 #include "hipWaveletOctree.h"

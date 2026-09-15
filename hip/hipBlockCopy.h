@@ -10,7 +10,6 @@
 #include "hipPlaneIO.h"
 
 using bcopy_float4_vec = __attribute__((__vector_size__(4 * sizeof(float)))) float;
-using bcopy_int4_vec   = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 
 static constexpr int BCOPY_ZPB = 8;
 
@@ -34,8 +33,6 @@ __global__ void hipcvx_copyToWaveletKernelOpt(
     int wnx, int wny, int wnz,
     double* __restrict__ d_partial_sums)
 {
-    constexpr int SLC = 2;
-
     int tid = threadIdx.x;
     int xg  = tid % 8;
     int yr  = tid / 8;
@@ -164,8 +161,6 @@ __global__ void hipcvx_copyFromWaveletKernelOpt(
     int x0, int y0, int z0,
     int ex, int ey, int ez)
 {
-    constexpr int SLC = 2;
-
     int tid = threadIdx.x;
     int xg  = tid % 8;
     int yr  = tid / 8;
@@ -222,30 +217,6 @@ __global__ void hipcvx_copyFromWaveletKernelOpt(
             }
         }
     }
-}
-
-__global__ void hipcvx_copyFromWaveletKernel(
-    const float* __restrict__ d_src,
-    int wnx, int wny, int wnz,
-    float* __restrict__ d_dst,
-    int ldimx, int ldimxy,
-    int x0, int y0, int z0,
-    int ex, int ey, int ez)
-{
-    int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    long total_out = (long)ex * ey * ez;
-    if (gid >= total_out) return;
-
-    int iz = gid / (ex * ey);
-    int rem = gid - iz * ex * ey;
-    int iy = rem / ex;
-    int ix = rem - iy * ex;
-
-    long src_offset = (long)iz * wnx * wny + (long)iy * wnx + ix;
-    float val = d_src[src_offset];
-
-    long dst_offset = (long)(z0 + iz) * ldimxy + (long)(y0 + iy) * ldimx + (x0 + ix);
-    d_dst[dst_offset] = val;
 }
 
 // Reduce partial sums → RMS.  Single block, 256 threads.

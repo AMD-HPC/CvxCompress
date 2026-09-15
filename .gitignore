@@ -13,3 +13,4 @@ Test_Compression
 Test_With_Generated_Input
 results.txt
 build/
+local/experiments/
