@@ -277,7 +277,9 @@ if (err != hipSuccess) {
 - **Wavefield values**: compression input must contain finite `float` values.
   NaN and infinity are outside the API contract.
 - **Concurrency**: a plan must not be used from multiple host threads. One
-  `hipCompress` must be synchronized before the next.
+  `hipCompress` must be synchronized before the next. Sequential calls may use
+  different user streams; the plan orders copy, RMS, compress, and decompress
+  work through an internal event.
 - **Data type**: `float` only (single precision).
 
 ## File Structure

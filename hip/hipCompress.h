@@ -100,6 +100,11 @@ struct hipCompressPlan {
     // (but not while compress_pending is true) to move the split per snapshot.
     hipCompressAuxStage aux_from;
     hipEvent_t  ready_event;
+    // Last user stream that accessed plan workspace. Calls on the same stream
+    // are naturally ordered. A stream change records ready_event on this
+    // stream and waits for it on the new stream.
+    hipStream_t workspace_stream;
+    bool workspace_stream_valid;
     size_t* h_staging;  // pinned host, 2 values: [offsets[nb-1], sizes[nb-1]]
 
     // Stream the D2H readback of the pending compress was enqueued on, i.e. the
@@ -151,7 +156,8 @@ hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 //
 // d_dst may be NULL (RMS-only mode). d_rms_out may be NULL (copy-only mode).
 // Both NULL is an error.
-// All GPU work is enqueued on user_stream.
+// All GPU work is enqueued on user_stream. Calls using one plan are ordered
+// through an internal event because RMS modes share plan workspace.
 hipError_t hipCopyToWaveletLayout(
     const float* d_src,
     int ldimx, int ldimxy,
@@ -178,7 +184,8 @@ hipError_t hipComputeRMS(
 // Copy from a wavelet-layout buffer back to a strided destination volume.
 // Only the ex*ey*ez extraction samples are written; padding is skipped.
 // Wavelet dims are derived from the extraction window.
-// All GPU work is enqueued on user_stream.
+// All GPU work is enqueued on user_stream. Calls using one plan are ordered
+// through the same internal event as copy, compress, and decompress.
 hipError_t hipCopyFromWaveletLayout(
     const float* d_src,
     float* d_dst,
