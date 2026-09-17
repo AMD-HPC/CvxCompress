@@ -130,6 +130,9 @@ inline void hipCompressWaveletDims(int wx, int wy, int wz,
 // Plan owns internal buffers and an event for stream bridging.
 // aux_stream runs the stages selected by aux_from. User-owned, shareable across
 // plans. One plan must not be used concurrently from multiple host threads.
+// All API calls using one plan must use the same user_stream. To change user
+// streams, the caller must order the old stream before the new one. Synchronize
+// the last user stream before destroying the plan.
 // Compress is exclusive (writes plan buffers).
 hipError_t hipCompressCreatePlan(
     hipCompressPlan** plan,
