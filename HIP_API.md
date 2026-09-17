@@ -254,12 +254,6 @@ An internal event bridges the two streams at whichever boundary `aux_from`
 selects. This lets simulation kernels continue on `user_stream` while the tail
 of compression finishes on `aux_stream`.
 
-The plan does not currently bridge work when consecutive API calls pass
-different `user_stream` values. Keep one plan on one user stream. To change
-streams, record an event on the old user stream and wait for it on the new
-stream before the next call. Synchronize the last user stream before destroying
-the plan. See [issue #11](https://github.com/AMD-HPC/CvxCompress/issues/11).
-
 `aux_from` is a **placement** knob, not a correctness one: all three settings
 produce byte-identical output. It is also not a free win. Measured against a
 wave propagation kernel that already saturates the GPU (512³ TTI, snapshot every
@@ -296,9 +290,13 @@ if (err != hipSuccess) {
 - **Wavefield values**: compression input must contain finite `float` values.
   NaN and infinity are outside the API contract.
 - **Concurrency**: a plan must not be used from multiple host threads. One
-  `hipCompress` must be synchronized before the next. All calls using one plan
-  must pass the same `user_stream` unless the caller explicitly orders a stream
-  change. Copy and RMS modes share plan-owned workspace and can race otherwise.
+  `hipCompress` must be synchronized before the next. Sequential calls may use
+  different user streams; the plan orders copy, RMS, compress, and decompress
+  work through an internal event. The plan remembers the last user stream by
+  its handle. `hipCompressDestroyPlan` waits on that stream, so destroy the plan
+  before you destroy the stream. Do not reuse a destroyed stream's handle for a
+  new stream while the plan is alive, because the plan would treat the new
+  stream as the old one and skip the ordering.
 - **Data type**: `float` only (single precision).
 
 ## File Structure
