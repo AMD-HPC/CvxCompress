@@ -709,6 +709,60 @@ static bool test_multithread_plans_2d()
     return pass;
 }
 
+static bool test_cross_stream_copy_ordering_2d()
+{
+    printf("Test 12: 2D same-plan copy ordering across streams\n");
+    const int NX = 128, NY = 128, total = NX * NY;
+    hipStream_t sA, sB, aux;
+    HIPCHECK(hipStreamCreate(&sA));
+    HIPCHECK(hipStreamCreate(&sB));
+    HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(
+        &plan, NX, NY, 1, aux, HIP_COMPRESS_KERNEL_QUADTREE));
+    float *d_src = nullptr, *d_wav = nullptr, *d_out = nullptr;
+    unsigned char* d_comp = nullptr;
+    HIPCHECK(hipMalloc(&d_src, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_wav, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out, (size_t)total * sizeof(float)));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp, maxout));
+
+    initSin2DKernel<<<(total + 255) / 256, 256, 0, sA>>>(
+        d_src, NX, NY, 20.0f, 20.0f);
+    HIPCHECK(hipCopyToWaveletLayout(
+        d_src, NX, NX * NY, 0, 0, 0, NX, NY, 1,
+        d_wav, plan->d_rms, plan, sA));
+    HIPCHECK(hipCompress(
+        5e-2f, plan->d_rms, d_wav, d_comp, plan, sB));
+    long len = 0;
+    HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+    HIPCHECK(hipDecompress(d_comp, d_wav, plan, sB));
+    HIPCHECK(hipCopyFromWaveletLayout(
+        d_wav, d_out, NX, NX * NY, 0, 0, 0, NX, NY, 1, plan, sA));
+    HIPCHECK(hipStreamSynchronize(sA));
+
+    std::vector<float> src(total), out(total);
+    HIPCHECK(hipMemcpy(src.data(), d_src, (size_t)total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out.data(), d_out, (size_t)total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    float rms = hostRMS(src.data(), total);
+    float err = maxAbsError(src.data(), out.data(), total);
+    bool pass = len > 0 && err < rms;
+    printf("  len=%ld, err=%.4e: %s\n",
+           len, err, pass ? "PASS" : "FAIL");
+
+    HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav));
+    HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(sA)); HIPCHECK(hipStreamDestroy(sB));
+    return pass;
+}
+
 int main()
 {
     printf("=== 2D Compression Tests ===\n\n");
@@ -737,6 +791,8 @@ int main()
     total++; if (test_concurrent_decode_2d()) passed++;
     printf("\n");
     total++; if (test_multithread_plans_2d()) passed++;
+    printf("\n");
+    total++; if (test_cross_stream_copy_ordering_2d()) passed++;
     printf("\n");
 
     printf("=== Results: %d/%d passed ===\n", passed, total);

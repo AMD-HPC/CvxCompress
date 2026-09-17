@@ -3056,6 +3056,85 @@ static bool test_two_stream_packing()
     return pass;
 }
 
+static bool test_cross_stream_copy_rms_ordering()
+{
+    printf("Regression: Same-plan copy/RMS ordering across streams\n");
+    const int N = 128;
+    const int total = N * N * N;
+
+    hipStream_t sA, sB, aux;
+    HIPCHECK(hipStreamCreate(&sA));
+    HIPCHECK(hipStreamCreate(&sB));
+    HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, aux));
+
+    float *d_srcA, *d_srcB, *d_wav, *d_out;
+    double *d_rmsA, *d_rmsB;
+    unsigned char* d_comp;
+    HIPCHECK(hipMalloc(&d_srcA, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_srcB, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_wav, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_rmsA, sizeof(double)));
+    HIPCHECK(hipMalloc(&d_rmsB, sizeof(double)));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp, maxout));
+
+    int blocks = (total + 255) / 256;
+    fillConstantKernel<<<blocks, 256, 0, sA>>>(d_srcA, total, 2.0f);
+    fillConstantKernel<<<blocks, 256, 0, sB>>>(d_srcB, total, 3.0f);
+    HIPCHECK(hipComputeRMS(
+        d_srcA, N, N * N, 0, 0, 0, N, N, N, d_rmsA, plan, sA));
+    HIPCHECK(hipComputeRMS(
+        d_srcB, N, N * N, 0, 0, 0, N, N, N, d_rmsB, plan, sB));
+    HIPCHECK(hipStreamSynchronize(sA));
+    HIPCHECK(hipStreamSynchronize(sB));
+
+    double rmsA = 0.0, rmsB = 0.0;
+    HIPCHECK(hipMemcpy(&rmsA, d_rmsA, sizeof(double), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(&rmsB, d_rmsB, sizeof(double), hipMemcpyDeviceToHost));
+    bool rms_ok = fabs(rmsA - 2.0) < 1e-12 && fabs(rmsB - 3.0) < 1e-12;
+
+    // Copy on sA, immediately consume on sB, then copy the decoded result back
+    // on sA. No caller event or stream synchronization bridges these calls.
+    initSinKernel<<<blocks, 256, 0, sA>>>(
+        d_srcA, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipCopyToWaveletLayout(
+        d_srcA, N, N * N, 0, 0, 0, N, N, N,
+        d_wav, plan->d_rms, plan, sA));
+    HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_wav, d_comp, plan, sB));
+    long len = 0;
+    HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+    HIPCHECK(hipDecompress(d_comp, d_wav, plan, sB));
+    HIPCHECK(hipCopyFromWaveletLayout(
+        d_wav, d_out, N, N * N, 0, 0, 0, N, N, N, plan, sA));
+    // Destruction must wait for the copy queued on sA through the plan event.
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    plan = nullptr;
+
+    std::vector<float> src(total), out(total);
+    HIPCHECK(hipMemcpy(src.data(), d_srcA, (size_t)total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out.data(), d_out, (size_t)total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+    float rms = hostRMS(src.data(), total);
+    float max_err = maxAbsError(src.data(), out.data(), total);
+    bool pass = rms_ok && len > 0 && max_err < rms;
+    printf("  rms=(%.1f,%.1f), len=%ld, err=%.4e: %s\n",
+           rmsA, rmsB, len, max_err, pass ? "PASS" : "FAIL");
+
+    HIPCHECK(hipFree(d_srcA)); HIPCHECK(hipFree(d_srcB));
+    HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_out));
+    HIPCHECK(hipFree(d_rmsA)); HIPCHECK(hipFree(d_rmsB));
+    HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(sA)); HIPCHECK(hipStreamDestroy(sB));
+    return pass;
+}
+
 int main(int argc, char** argv)
 {
     // Isolated diagnostic mode: a single numeric arg = forced byte shift for the
@@ -3069,7 +3148,7 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 38;
+    int passed = 0, total = 39;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
     if (test_octree_round_trip())           ++passed;
@@ -3108,6 +3187,7 @@ int main(int argc, char** argv)
     if (test_soffset_overflow())                  ++passed;
     if (test_pointer_shift_alignment(-1))         ++passed;
     if (test_two_stream_packing())                ++passed;
+    if (test_cross_stream_copy_rms_ordering())    ++passed;
 
     printf("\n%d/%d TESTS PASSED\n\n", passed, total);
 
