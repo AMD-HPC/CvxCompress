@@ -33,14 +33,16 @@ module load rocm/7.2.1
 # Build the CPU reference library (needed by tests)
 make libcvxcompress.so
 
-# Build the API test suite (38 tests + benchmarks)
+# Build the retained correctness suites and performance benchmark
 make HIP_ARCH=gfx942 test_compress_api_hip
-
-# Build the async pipeline example
-make HIP_ARCH=gfx942 example_async_pipeline
+make HIP_ARCH=gfx942 test_compress_2d_hip
+make HIP_ARCH=gfx942 test_async_overlap_3d
+make HIP_ARCH=gfx942 test_inverse_wavelet_hip
+make HIP_ARCH=gfx942 bench_encode_full
 ```
 
-Set `HIP_ARCH` to match your target: `gfx90a` for MI200, `gfx942` for MI300X.
+Set `HIP_ARCH` to match your target: `gfx90a` for MI200, `gfx942` for MI300X,
+or `gfx950` for MI355X.
 
 ## API Overview
 
@@ -147,11 +149,11 @@ hipFree(d_comp);
 
 ### Async Pipeline Overlap
 
-See [`tests/example_async_pipeline.cpp`](tests/example_async_pipeline.cpp) for a
-complete example that overlaps simulation compute on `user_stream` with compression
-on `aux_stream`. The two-stream design lets the simulation proceed immediately
-after `hipCompress` returns — compaction and host readback run concurrently on the
-auxiliary stream.
+See [`tests/test_async_overlap_3d.cpp`](tests/test_async_overlap_3d.cpp) for the
+tested pipeline pattern. It overlaps simulation compute on `user_stream` with
+compression on `aux_stream`, then decompresses and checks the result. The
+two-stream design lets the simulation proceed immediately after `hipCompress`
+returns. Compaction and host readback run concurrently on the auxiliary stream.
 
 ## Key Concepts
 
@@ -286,6 +288,7 @@ hip/
   hipCompress.cpp                API implementation
   hipCompact.h                   Compact stream header and scan helpers
   hipBlockCopy.h                 CopyTo / CopyFrom kernels
+  hipCodecCommon.h               Shared quantization and width helpers
   hipWaveletBitmap.h             Bitmap significance split and inverse transform
   hipWaveletOctree.h             Octree significance coder + shared inverse stage
   hipWaveletQuadtree2D.h         Quadtree coder and 2D transform
@@ -293,8 +296,12 @@ hip/
   ds79_reg32.inc                 Unrolled forward wavelet (32-point)
   us79_reg32.inc                 Unrolled inverse wavelet (32-point)
 tests/
-  test_compress_api_hip.cpp      API test suite and benchmarks
-  example_async_pipeline.cpp     Async overlap example
+  hip_test_common.h              Shared HIP test error handling
+  test_compress_api_hip.cpp      3D API regression suite
+  test_compress_2d_hip.cpp       2D quadtree regression suite
+  test_async_overlap_3d.cpp      Async stream correctness and overlap
+  test_inverse_wavelet_hip.cpp   Wavelet primitive regression suite
+  bench_encode_full.cpp          End-to-end encode benchmark
 ```
 
 ## License

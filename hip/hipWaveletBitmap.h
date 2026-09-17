@@ -23,6 +23,7 @@
 #include <hip/hip_runtime.h>
 #include <rocprim/block/block_scan.hpp>
 #include "ds79.h"
+#include "hipCodecCommon.h"
 #include "hipPlaneIO.h"
 
 using hipcvx_wavelet_float4 = ds79_float4_vec;
@@ -33,27 +34,6 @@ static constexpr int  WBMP_BITMAP_BYTES = WBMP_BITMAP_WORDS * 4;      // 4096
 // Worst case (all 32768 coefficients nonzero) value region.
 static constexpr int  WBMP_MAX_VAL_BYTES = 32768 * 4;                 // 131072
 static constexpr long WBMP_SLOT_BYTES     = WBMP_BITMAP_BYTES + WBMP_MAX_VAL_BYTES; // 135168
-
-__host__ __device__ __forceinline__ int hipcvx_quantize_i32(float value)
-{
-#if defined(__HIP_DEVICE_COMPILE__)
-    // Clamp with one V_MED3_F32 before the conversion.  The upper endpoint is
-    // the largest float below 2^31, so every converted value is representable.
-    float clamped = __builtin_amdgcn_fmed3f(
-        value, -2147483648.0f, 2147483520.0f);
-    return (int)clamped;
-#else
-    if (!(value == value)) return 0;
-    if (value >= 2147483520.0f) return 2147483520;
-    if (value <= -2147483648.0f) return (-2147483647 - 1);
-    return (int)value;
-#endif
-}
-
-__host__ __device__ __forceinline__ unsigned hipcvx_abs_i32(int value)
-{
-    return value < 0 ? 0u - (unsigned)value : (unsigned)value;
-}
 
 __launch_bounds__(256, 2)
 __global__ void hipcvx_waveletBitmapFusedKernel(
@@ -67,7 +47,6 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
 {
     constexpr int PLANES = 32;
     constexpr int BATCH  = 8;
-    constexpr int SLC    = 2;
     constexpr int NTHREADS = 256;
     using BlockScan = rocprim::block_scan<int, NTHREADS>;
 
@@ -195,16 +174,6 @@ __global__ void hipcvx_waveletBitmapFusedKernel(
         block_sizes[bid] = (size_t)WBMP_BITMAP_BYTES + (size_t)block_val_base * 4;
 }
 
-// Minimum signed byte width to hold [-maxabs, maxabs].
-__host__ __device__ __forceinline__ int wbmp_width_bytes(unsigned maxabs) {
-    if (maxabs <= 0x7f)      return 1;
-    if (maxabs <= 0x7fff)    return 2;
-    if (maxabs <= 0x7fffff)  return 3;
-    return 4;
-}
-
-static constexpr int  WBMP_WTAB_BYTES     = 256;   // 2 bits * 1024 lines
-
 // Wave64 block scan used by the parallel octree significance coder.
 namespace wbmp_opt {
 
@@ -285,25 +254,5 @@ __device__ __forceinline__ void block_exscan2(
 }
 
 }  // namespace wbmp_opt
-
-// Launch helper for the fused transform and bitmap pass. output must have
-// nblocks * WBMP_SLOT_BYTES bytes; block_sizes has nblocks entries.
-inline hipError_t hipWaveletBitmapFused(
-    const float* input,
-    unsigned char* output,
-    size_t* block_sizes,
-    float scale,
-    int nx, int ny, int nz,
-    int ldimx, int ldimxy,
-    const double* d_rms = nullptr,
-    float* d_mulfac_out = nullptr,
-    hipStream_t stream = 0)
-{
-    dim3 grid((nx + 31) / 32, (ny + 31) / 32, (nz + 31) / 32);
-    hipcvx_waveletBitmapFusedKernel<<<grid, dim3(256), 0, stream>>>(
-        input, output, block_sizes, scale, ldimx, ldimxy,
-        d_rms, d_mulfac_out);
-    return hipGetLastError();
-}
 
 #endif // HIPWAVELET_BITMAP_H

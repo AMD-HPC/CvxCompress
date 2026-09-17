@@ -14,14 +14,7 @@
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "ds79.h"
-
-#define HIPCHECK(cmd) do { \
-    hipError_t err = cmd; \
-    if (err != hipSuccess) { \
-        fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__, hipGetErrorString(err)); \
-        exit(1); \
-    } \
-} while(0)
+#include "hip_test_common.h"
 
 // ---- Test 1: CPU scalar round-trip ----
 bool test_cpu_scalar() {

@@ -8,10 +8,8 @@
 // quantize + significance) stays on user_stream because it reads the caller's
 // live input, and everything downstream -- entropy coding, the size scan,
 // compaction, D2H readback -- runs on plan->aux_stream via an internal event
-// bridge. Nothing tested that split. test_compress_api_hip passes an aux stream
-// but synchronizes before every check, so it would pass with the bridge removed;
-// example_async_pipeline has the right shape but never decompresses, never
-// compares, and returns 0 unconditionally.
+// bridge. The general API suite synchronizes before every check, so it would
+// pass with the bridge removed. This test exercises the split directly.
 //
 // The four properties that actually matter, all on 3D volumes:
 //
@@ -40,15 +38,7 @@
 #include <string>
 #include <hip/hip_runtime.h>
 #include "hipCompress.h"
-
-#define HIPCHECK(cmd) do { \
-    hipError_t e = (cmd); \
-    if (e != hipSuccess) { \
-        fprintf(stderr, "HIP error %s at %s:%d\n", hipGetErrorString(e), \
-                __FILE__, __LINE__); \
-        exit(1); \
-    } \
-} while(0)
+#include "hip_test_common.h"
 
 static int g_fail = 0;
 static void check(bool ok, const char* what)

@@ -13,14 +13,7 @@
 #include <hip/hip_runtime.h>
 #include "hipCompress.h"
 #include "CvxCompress.hxx"
-
-#define HIPCHECK(cmd) do { \
-    hipError_t e = (cmd); \
-    if (e != hipSuccess) { \
-        fprintf(stderr, "HIP error %s at %s:%d\n", hipGetErrorString(e), __FILE__, __LINE__); \
-        exit(1); \
-    } \
-} while(0)
+#include "hip_test_common.h"
 
 __global__ void initSinKernel(float* data, int nx, int ny, int nz, float kx, float ky, float kz)
 {

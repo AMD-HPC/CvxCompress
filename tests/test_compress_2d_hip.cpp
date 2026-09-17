@@ -17,14 +17,7 @@
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "hipCompress.h"
-
-#define HIPCHECK(cmd) do { \
-    hipError_t e = (cmd); \
-    if (e != hipSuccess) { \
-        fprintf(stderr, "HIP error %s at %s:%d\n", hipGetErrorString(e), __FILE__, __LINE__); \
-        exit(1); \
-    } \
-} while(0)
+#include "hip_test_common.h"
 
 __global__ void initSin2DKernel(float* data, int nx, int ny, float kx, float ky)
 {
