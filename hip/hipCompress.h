@@ -28,6 +28,7 @@ enum hipCompressError_t {
     HIP_COMPRESS_ERROR_HIP_RUNTIME,
     HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE,
     HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
+    HIP_COMPRESS_ERROR_NO_COMPRESS_DATA,
 };
 
 struct hipCompressPlan;
@@ -108,6 +109,7 @@ struct hipCompressPlan {
     // aux_stream would return without waiting for anything.
     hipStream_t pending_stream;
     bool compress_pending;  // true between hipCompress and hipCompressSynchronize
+    bool compress_data_ready;  // true after sync until next accepted hipCompress
     mutable hipCompressError_t last_error;
 };
 
@@ -205,7 +207,8 @@ hipError_t hipCopyFromWaveletLayout(
 // regardless of aux_from.
 // Rejects with hipErrorNotReady if a previous compress has not been
 // synchronized via hipCompressSynchronize.
-// Call hipCompressSynchronize to retrieve compressed_length and CR.
+// Use hipCompressSynchronize(plan) followed by hipCompressGetData, or use the
+// compatibility hipCompressSynchronize(plan, length, ratio) overload.
 hipError_t hipCompress(
     float scale,
     const double* d_rms,
@@ -214,10 +217,22 @@ hipError_t hipCompress(
     hipCompressPlan* plan,
     hipStream_t user_stream);
 
-// Block on aux_stream and retrieve the result of a previous hipCompress.
-// If compress_pending: syncs aux_stream, writes compressed_length and
-//   compression_ratio (either may be NULL), clears pending. Returns hipSuccess.
-// If !compress_pending: no-op, leaves outputs untouched. Returns hipErrorNotReady.
+// Block until a previous hipCompress completes. The completed result remains
+// available through hipCompressGetData until the next accepted hipCompress.
+// Returns hipErrorNotReady if no compression is pending.
+hipError_t hipCompressSynchronize(hipCompressPlan* plan);
+
+// Retrieve the result of a completed hipCompress without blocking.
+// compressed_length and compression_ratio may be NULL. Returns hipErrorNotReady
+// before hipCompressSynchronize completes or after a new hipCompress starts.
+hipError_t hipCompressGetData(
+    hipCompressPlan* plan,
+    long* compressed_length,
+    float* compression_ratio);
+
+// Compatibility overload: synchronize and retrieve the result in one call.
+// compressed_length and compression_ratio may be NULL. Returns hipErrorNotReady
+// if no compression is pending.
 hipError_t hipCompressSynchronize(
     hipCompressPlan* plan,
     long* compressed_length,
