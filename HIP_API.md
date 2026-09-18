@@ -68,7 +68,9 @@ All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
 | Function | Description |
 |----------|-------------|
 | `hipCompress` | Wavelet + quantize + encode (per-plan codec) → self-contained compressed stream (async) |
-| `hipCompressSynchronize` | Block until compress completes, retrieve compressed length and CR |
+| `hipCompressSynchronize(plan)` | Block until compress completes |
+| `hipCompressGetData` | Retrieve compressed length and CR after synchronization (nonblocking) |
+| `hipCompressSynchronize(plan, length, ratio)` | Compatibility overload that synchronizes and retrieves data |
 | `hipDecompress` | Decode (per-plan codec) + inverse wavelet → wavelet buffer (async) |
 
 ### Utilities
@@ -126,10 +128,11 @@ hipCopyToWaveletLayout(
 float scale = 5e-2f;   // error tolerance relative to RMS
 hipCompress(scale, plan->d_rms, d_wavelet, d_comp, plan, user_stream);
 
-// 6. Synchronize and get result
+// 6. Synchronize, then retrieve the result without another wait
 long compressed_bytes;
 float compression_ratio;
-hipCompressSynchronize(plan, &compressed_bytes, &compression_ratio);
+hipCompressSynchronize(plan);
+hipCompressGetData(plan, &compressed_bytes, &compression_ratio);
 
 // ... store d_comp[0..compressed_bytes-1] to disk or transfer ...
 
@@ -146,6 +149,16 @@ hipCompressDestroyPlan(plan);
 hipFree(d_wavelet);
 hipFree(d_comp);
 ```
+
+The existing combined form remains available:
+
+```cpp
+hipCompressSynchronize(plan, &compressed_bytes, &compression_ratio);
+```
+
+`hipCompressGetData` returns `hipErrorNotReady` before synchronization. Result
+data remains available for repeated getter calls until the next accepted
+`hipCompress` call starts.
 
 ### Async Pipeline Overlap
 

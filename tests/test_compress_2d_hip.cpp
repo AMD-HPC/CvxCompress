@@ -163,7 +163,8 @@ static bool test_round_trip_2d()
 
     const float direct_mulfac = 32.0f;
     HIPCHECK(hipCompress(direct_mulfac, nullptr, d_input, d_compressed, plan, 0));
-    HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+    HIPCHECK(hipCompressSynchronize(plan));
+    HIPCHECK(hipCompressGetData(plan, nullptr, nullptr));
     float stored_mulfac = 0.0f;
     HIPCHECK(hipMemcpy(&stored_mulfac, plan->d_mulfac, sizeof(float),
                        hipMemcpyDeviceToHost));

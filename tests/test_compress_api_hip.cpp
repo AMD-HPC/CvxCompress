@@ -890,6 +890,18 @@ static bool test_compress_pending_guard()
     HIPCHECK(hipMalloc(&d_comp, comp_size_guard));
     HIPCHECK(hipMemset(d_in, 0, total * sizeof(float)));
 
+    long untouched_len = -1;
+    float untouched_cr = -1.0f;
+    hipError_t err = hipCompressGetData(plan, &untouched_len, &untouched_cr);
+    if (err != hipErrorNotReady ||
+        plan->last_error != HIP_COMPRESS_ERROR_NO_COMPRESS_DATA ||
+        untouched_len != -1 || untouched_cr != -1.0f) {
+        printf("  FAIL: getter succeeded or changed outputs before compression\n");
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
     HIPCHECK(deviceRMS(d_in, 128, 128, 128, plan->d_rms, plan));
     HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_in, d_comp, plan, 0));
 
@@ -900,8 +912,19 @@ static bool test_compress_pending_guard()
         return false;
     }
 
+    // Data is not available until the pending stream has completed.
+    err = hipCompressGetData(plan, nullptr, nullptr);
+    if (err != hipErrorNotReady ||
+        plan->last_error != HIP_COMPRESS_ERROR_NO_COMPRESS_DATA) {
+        printf("  FAIL: getter succeeded before synchronization\n");
+        hipCompressSynchronize(plan, nullptr, nullptr);
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
     // Second hipCompress should be rejected
-    hipError_t err = hipCompress(5e-2f, plan->d_rms, d_in, d_comp, plan, 0);
+    err = hipCompress(5e-2f, plan->d_rms, d_in, d_comp, plan, 0);
     if (err != hipErrorNotReady) {
         printf("  FAIL: second hipCompress not rejected (err=%d)\n", (int)err);
         hipCompressSynchronize(plan, nullptr, nullptr);
@@ -910,28 +933,83 @@ static bool test_compress_pending_guard()
         return false;
     }
 
-    // Synchronize should clear pending
-    long len = 0;
-    HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+    // Split synchronization clears pending and publishes result data.
+    HIPCHECK(hipCompressSynchronize(plan));
 
-    if (plan->compress_pending) {
-        printf("  FAIL: compress_pending=true after Synchronize\n");
+    if (plan->compress_pending || !plan->compress_data_ready) {
+        printf("  FAIL: incorrect state after split synchronization\n");
         hipFree(d_in); hipFree(d_comp);
         hipCompressDestroyPlan(plan);
         return false;
     }
 
-    // Synchronize when not pending should return hipErrorNotReady
+    long len = 0;
+    float cr = 0.0f;
+    HIPCHECK(hipCompressGetData(plan, &len, &cr));
+    long len_again = 0;
+    float cr_again = 0.0f;
+    HIPCHECK(hipCompressGetData(plan, &len_again, &cr_again));
+    if (len <= 0 || cr <= 0.0f || len_again != len || cr_again != cr) {
+        printf("  FAIL: split getter returned inconsistent data\n");
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
+    // Synchronize again when not pending should return hipErrorNotReady.
+    err = hipCompressSynchronize(plan);
+    if (err != hipErrorNotReady ||
+        plan->last_error != HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING) {
+        printf("  FAIL: split Synchronize on idle plan did not return hipErrorNotReady\n");
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
+    // Starting another compression invalidates the previous getter data.
+    HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_in, d_comp, plan, 0));
+    err = hipCompressGetData(plan, nullptr, nullptr);
+    if (err != hipErrorNotReady) {
+        printf("  FAIL: getter retained stale data during a new compression\n");
+        hipCompressSynchronize(plan, nullptr, nullptr);
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
+    // The existing combined overload still synchronizes and returns data.
+    long legacy_len = 0;
+    float legacy_cr = 0.0f;
+    HIPCHECK(hipCompressSynchronize(plan, &legacy_len, &legacy_cr));
+    if (legacy_len != len || legacy_cr != cr) {
+        printf("  FAIL: combined Synchronize returned different data\n");
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
+    // The completed data remains available through the split getter.
+    len_again = 0;
+    cr_again = 0.0f;
+    HIPCHECK(hipCompressGetData(plan, &len_again, &cr_again));
+    if (len_again != legacy_len || cr_again != legacy_cr) {
+        printf("  FAIL: getter differs after combined Synchronize\n");
+        hipFree(d_in); hipFree(d_comp);
+        hipCompressDestroyPlan(plan);
+        return false;
+    }
+
+    // The combined overload retains its old no-pending behavior.
     err = hipCompressSynchronize(plan, nullptr, nullptr);
     if (err != hipErrorNotReady) {
-        printf("  FAIL: Synchronize on idle plan did not return hipErrorNotReady\n");
+        printf("  FAIL: combined Synchronize on idle plan did not return hipErrorNotReady\n");
         hipFree(d_in); hipFree(d_comp);
         hipCompressDestroyPlan(plan);
         return false;
     }
 
     hipFree(d_in); hipFree(d_comp);
-    printf("  pending state transitions: PASS\n");
+    printf("  pending and result state transitions: PASS\n");
 
     hipCompressDestroyPlan(plan);
     return true;
@@ -2488,8 +2566,18 @@ static bool test_error_codes()
     }
     {
         hipError_t err = hipCompressSynchronize(nullptr, nullptr, nullptr);
-        if (err != hipErrorInvalidValue) { printf("  FAIL [Synchronize null plan]\n"); pass = false; }
-        else printf("  ok [Synchronize null plan]\n");
+        if (err != hipErrorInvalidValue) { printf("  FAIL [combined Synchronize null plan]\n"); pass = false; }
+        else printf("  ok [combined Synchronize null plan]\n");
+    }
+    {
+        hipError_t err = hipCompressSynchronize(nullptr);
+        if (err != hipErrorInvalidValue) { printf("  FAIL [split Synchronize null plan]\n"); pass = false; }
+        else printf("  ok [split Synchronize null plan]\n");
+    }
+    {
+        hipError_t err = hipCompressGetData(nullptr, nullptr, nullptr);
+        if (err != hipErrorInvalidValue) { printf("  FAIL [GetData null plan]\n"); pass = false; }
+        else printf("  ok [GetData null plan]\n");
     }
     {
         hipError_t err = hipCopyToWaveletLayout(nullptr, 0, 0,
@@ -2597,11 +2685,16 @@ static bool test_error_codes()
     // --- Synchronize errors ---
     {
         hipError_t err = hipCompressSynchronize(plan, nullptr, nullptr);
-        if (!check_error("Synchronize no pending", plan, err,
+        if (!check_error("combined Synchronize no pending", plan, err,
                           hipErrorNotReady, HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING))
             pass = false;
     }
-
+    {
+        hipError_t err = hipCompressSynchronize(plan);
+        if (!check_error("split Synchronize no pending", plan, err,
+                          hipErrorNotReady, HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING))
+            pass = false;
+    }
     // --- CopyToWaveletLayout errors ---
     {
         hipError_t err = hipCopyToWaveletLayout(

@@ -81,6 +81,7 @@ const char* hipCompressErrorString(hipCompressError_t err)
     case HIP_COMPRESS_ERROR_INVALID_CODEC:    return "codec is invalid for this plan";
     case HIP_COMPRESS_ERROR_INVALID_AUX_STAGE: return "invalid auxiliary stream stage";
     case HIP_COMPRESS_ERROR_INVALID_ALIGNMENT: return "compressed buffer must be 8-byte aligned";
+    case HIP_COMPRESS_ERROR_NO_COMPRESS_DATA: return "no synchronized compress data available";
     case HIP_COMPRESS_ERROR_HIP_RUNTIME:      return "internal HIP runtime error";
     default:                                  return "unknown error";
     }
@@ -149,6 +150,7 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     p->aux_from = aux_from;
     p->pending_stream = aux_stream;
     p->compress_pending = false;
+    p->compress_data_ready = false;
     p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
 
     if (is_2d) {
@@ -286,6 +288,9 @@ hipError_t hipCompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
                    hipErrorInvalidValue);
 
+    // A successfully started compression replaces the previous result.
+    plan->compress_data_ready = false;
+
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int ldimx = nx;
     const int nb = plan->num_blocks;
@@ -397,10 +402,7 @@ hipError_t hipCompress(
     return hipSuccess;
 }
 
-hipError_t hipCompressSynchronize(
-    hipCompressPlan* plan,
-    long* compressed_length,
-    float* compression_ratio)
+hipError_t hipCompressSynchronize(hipCompressPlan* plan)
 {
     if (!plan) return hipErrorInvalidValue;
     plan->last_error = HIP_COMPRESS_SUCCESS;
@@ -408,6 +410,21 @@ hipError_t hipCompressSynchronize(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING, hipErrorNotReady);
 
     HIPCHECK_PLAN(plan, hipStreamSynchronize(plan->pending_stream));
+
+    plan->compress_pending = false;
+    plan->compress_data_ready = true;
+    return hipSuccess;
+}
+
+hipError_t hipCompressGetData(
+    hipCompressPlan* plan,
+    long* compressed_length,
+    float* compression_ratio)
+{
+    if (!plan) return hipErrorInvalidValue;
+    plan->last_error = HIP_COMPRESS_SUCCESS;
+    if (!plan->compress_data_ready)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NO_COMPRESS_DATA, hipErrorNotReady);
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int nb = plan->num_blocks;
@@ -438,8 +455,23 @@ hipError_t hipCompressSynchronize(
                 raw / (double)total_bytes);
     }
 
-    plan->compress_pending = false;
     return hipSuccess;
+}
+
+hipError_t hipCompressSynchronize(
+    hipCompressPlan* plan,
+    long* compressed_length,
+    float* compression_ratio)
+{
+    if (!plan) return hipErrorInvalidValue;
+    plan->last_error = HIP_COMPRESS_SUCCESS;
+    if (!plan->compress_pending)
+        PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING, hipErrorNotReady);
+
+    hipError_t err = hipCompressSynchronize(plan);
+    if (err != hipSuccess)
+        return err;
+    return hipCompressGetData(plan, compressed_length, compression_ratio);
 }
 
 hipError_t hipCopyToWaveletLayout(
