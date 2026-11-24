@@ -731,8 +731,30 @@ static bool test_cross_stream_copy_ordering_2d()
     HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
     HIPCHECK(hipMalloc(&d_comp, maxout));
 
+    // Reference: the same pipeline on one stream, with a sync between steps.
+    const size_t wav_bytes = (size_t)total * sizeof(float);
+    float* d_ref = nullptr;
+    HIPCHECK(hipMalloc(&d_ref, wav_bytes));
     initSin2DKernel<<<(total + 255) / 256, 256, 0, sA>>>(
         d_src, NX, NY, 20.0f, 20.0f);
+    HIPCHECK(hipCopyToWaveletLayout(
+        d_src, NX, NX * NY, 0, 0, 0, NX, NY, 1,
+        d_wav, plan->d_rms, plan, sA));
+    HIPCHECK(hipCompress(
+        5e-2f, plan->d_rms, d_wav, d_comp, plan, sA));
+    long ref_len = 0;
+    HIPCHECK(hipCompressSynchronize(plan, &ref_len, nullptr));
+    HIPCHECK(hipDecompress(d_comp, d_wav, plan, sA));
+    HIPCHECK(hipCopyFromWaveletLayout(
+        d_wav, d_ref, NX, NX * NY, 0, 0, 0, NX, NY, 1, plan, sA));
+    HIPCHECK(hipStreamSynchronize(sA));
+
+    // Cross-stream: copy on sA, consume on sB, then copy the decoded result back
+    // on sA. Hold each producer back with a spin kernel and zero the buffer it
+    // fills. The consumer on the other stream then reads zeros, and the result
+    // differs from the reference, unless the plan orders the two streams.
+    HIPCHECK(hipMemset(d_wav, 0, wav_bytes));
+    spinKernel<<<1, 1, 0, sA>>>(1000000);
     HIPCHECK(hipCopyToWaveletLayout(
         d_src, NX, NX * NY, 0, 0, 0, NX, NY, 1,
         d_wav, plan->d_rms, plan, sA));
@@ -740,22 +762,26 @@ static bool test_cross_stream_copy_ordering_2d()
         5e-2f, plan->d_rms, d_wav, d_comp, plan, sB));
     long len = 0;
     HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+    HIPCHECK(hipMemsetAsync(d_wav, 0, wav_bytes, sB));
+    spinKernel<<<1, 1, 0, sB>>>(1000000);
     HIPCHECK(hipDecompress(d_comp, d_wav, plan, sB));
     HIPCHECK(hipCopyFromWaveletLayout(
         d_wav, d_out, NX, NX * NY, 0, 0, 0, NX, NY, 1, plan, sA));
     HIPCHECK(hipStreamSynchronize(sA));
 
-    std::vector<float> src(total), out(total);
-    HIPCHECK(hipMemcpy(src.data(), d_src, (size_t)total * sizeof(float),
-                       hipMemcpyDeviceToHost));
-    HIPCHECK(hipMemcpy(out.data(), d_out, (size_t)total * sizeof(float),
-                       hipMemcpyDeviceToHost));
+    std::vector<float> src(total), out(total), ref(total);
+    HIPCHECK(hipMemcpy(src.data(), d_src, wav_bytes, hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out.data(), d_out, wav_bytes, hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(ref.data(), d_ref, wav_bytes, hipMemcpyDeviceToHost));
     float rms = hostRMS(src.data(), total);
-    float err = maxAbsError(src.data(), out.data(), total);
-    bool pass = len > 0 && err < rms;
-    printf("  len=%ld, err=%.4e: %s\n",
-           len, err, pass ? "PASS" : "FAIL");
+    float ref_err = maxAbsError(src.data(), ref.data(), total);
+    bool identical = memcmp(out.data(), ref.data(), wav_bytes) == 0;
+    bool pass = ref_len > 0 && ref_err < rms && len == ref_len && identical;
+    printf("  len=%ld (ref %ld), ref err=%.4e, identical to ref=%s: %s\n",
+           len, ref_len, ref_err, identical ? "yes" : "no",
+           pass ? "PASS" : "FAIL");
 
+    HIPCHECK(hipFree(d_ref));
     HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav));
     HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_comp));
     HIPCHECK(hipCompressDestroyPlan(plan));
