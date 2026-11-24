@@ -1791,8 +1791,27 @@ static bool test_wavelet_dims_helper()
     return pass;
 }
 
+// Block-periodic test field: s(ix) * s(iy) * s(iz), s(i) = sin(2*pi*((i % P) + 0.5) / P).
+// P divides 32, so every 32^3 wavelet block holds the same samples at every grid
+// size. The CR and the RMS then do not depend on the grid size, and a throughput
+// sweep over grids does not mix size effects with density effects. P sets the
+// density: a smaller period is a higher frequency and more nonzero coefficients.
+__global__ void initPeriodicKernel(float* data, int nx, int ny, int nz, int P)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)nx * ny * nz;
+    if (idx >= total) return;
+    int iz = (int)(idx / ((long)nx * ny));
+    int iy = (int)((idx - (long)iz * nx * ny) / nx);
+    int ix = (int)(idx - (long)iz * nx * ny - (long)iy * nx);
+    const float w = 6.28318530717958647692f / (float)P;
+    data[idx] = sinf(w * (float)((ix % P) + 0.5f)) *
+                sinf(w * (float)((iy % P) + 0.5f)) *
+                sinf(w * (float)((iz % P) + 0.5f));
+}
+
 static void bench_grid_size(int nx, int ny, int nz, float scale,
-                            hipCompressKernel kernel, const char* label)
+                            hipCompressKernel kernel, const char* label, int period)
 {
     long total = (long)nx * ny * nz;
     float data_MB = (float)total * sizeof(float) / (1024.0f * 1024.0f);
@@ -1810,7 +1829,7 @@ static void bench_grid_size(int nx, int ny, int nz, float scale,
     HIPCHECK(hipMalloc(&d_compressed, comp_size));
 
     int threads = 256, blocks = (int)((total + threads - 1) / threads);
-    initSinKernel<<<blocks, threads>>>(d_input, nx, ny, nz, 40.0f, 40.0f, 40.0f);
+    initPeriodicKernel<<<blocks, threads>>>(d_input, nx, ny, nz, period);
     HIPCHECK(hipDeviceSynchronize());
 
     const int warmup = 10, iters = 50;
@@ -1843,7 +1862,7 @@ static void bench_grid_size(int nx, int ny, int nz, float scale,
     float fwd_bw = data_MB / fwd_ms * 1000.0f / 1024.0f;
     float inv_bw = data_MB / inv_ms * 1000.0f / 1024.0f;
 
-    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
+    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %9.1f  %8.3f  %9.1f  %5.2fx\n",
            nx, ny, nz, label, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
 
     hipEventDestroy(t0); hipEventDestroy(t1); hipEventDestroy(t2);
@@ -1854,9 +1873,11 @@ static void bench_grid_size(int nx, int ny, int nz, float scale,
 static void bench_throughput()
 {
     const float scale = 5e-2f;
-    printf("Benchmark: API throughput, scale=%.0e, sin(40x)sin(40y)sin(40z)\n", scale);
-    printf("  %16s  %7s  %7s  %6s  %8s  %8s  %8s  %8s  %5s\n",
-           "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
+
+    // Sine period in samples; each divides the 32-sample wavelet block. Smaller
+    // is denser. P=2 is a +-1 checkerboard (one Nyquist pattern), so its CR is
+    // higher than P=4 and the density is not monotone in P at the low end.
+    const int periods[] = {32, 16, 8, 4, 2};
 
     int sizes[][3] = {
         {352, 416, 320},
@@ -1869,9 +1890,17 @@ static void bench_throughput()
         {512, 512, 512},
     };
 
-    // Retained 3D codec on the API path.
-    for (auto& s : sizes) {
-        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,   "octree");
+    // Retained 3D codec on the API path. GiB/s = 2^30 bytes per second.
+    for (int P : periods) {
+        printf("Benchmark: API throughput, scale=%.0e, block-periodic sine, P=%d\n",
+               scale, P);
+        printf("  %16s  %7s  %7s  %6s  %8s  %9s  %8s  %9s  %5s\n",
+               "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GiB/s", "inv(ms)", "inv GiB/s", "ratio");
+        for (auto& s : sizes) {
+            bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,
+                            "octree", P);
+        }
+        printf("\n");
     }
 }
 
