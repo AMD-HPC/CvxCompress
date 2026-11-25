@@ -4,19 +4,11 @@
 //
 // Single global-memory plane-addressing path for the wavefield/wavelet buffers.
 //
-// The codec kernels used to read/write planes with buffer instructions
-// (make_buffer_rsrc + raw_buffer_load/store_*), whose intra-plane byte offset
-// is 32-bit -- capping a single plane at 4 GB (nx*ny*4 <= 2^32).  A/B
-// benchmarking (buffer vs global "saddr" load, uint32 vs size_t offset) showed
-// the global path matches or beats buffer on both gfx942 and gfx950 with equal
-// or lower register pressure, and that widening the offset to 64 bits is free.
-// So every plane access now uses a 64-bit base pointer plus a size_t byte
-// offset, lifting the 4 GB per-plane limit.  Loads/stores are nontemporal to
-// preserve the previous SLC (streaming) cache hint.
+// Every plane access uses a 64-bit base pointer plus a size_t byte offset, so a
+// single plane is not capped at 4 GB.  Loads and stores are nontemporal.
 //
-// Note: buffer instructions also provided free out-of-bounds clamping via
-// num_records.  Global loads/stores do not, so any kernel that could touch a
-// ragged (non-32-multiple) edge must bound-check explicitly.  The fused codec
+// Note: global loads and stores do no out-of-bounds clamping.  Any kernel that
+// could touch a ragged (non-32-multiple) edge must bound-check explicitly.  The fused codec
 // kernels operate only on 32-aligned full tiles (the public API mandates
 // 32-multiple dims), so they never go out of bounds; the block-copy kernels,
 // which handle arbitrary extraction windows, carry explicit per-lane guards.

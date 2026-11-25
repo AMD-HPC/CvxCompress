@@ -50,16 +50,11 @@ enum hipCompressKernel {
 // where "transform" is the fused wavelet + quantize + significance pass and
 // "encode" is the entropy coder (octree/quadtree significance + PFOR values).
 //
-// Transform never moves: it is bandwidth-bound and reads the caller's live
-// input buffer, so overlapping it only steals HBM from the caller.
+// Transform never moves: it reads the caller's live input buffer, so it always
+// runs on user_stream.
 //
 // This is a placement knob, not a correctness one: all three settings produce
-// byte-identical output. It is also not a free win. Measured against a wave
-// propagation kernel that already saturates the GPU, FROM_ENCODE is 2-4% SLOWER
-// than NONE, because the entropy coder is a throughput kernel with no idle
-// slack to reclaim and co-residency costs more than the hiding saves. See
-// rtm_storage/hipcvx_overlap_findings.md, sections 3f and 3h. Profile your own
-// caller before moving off the default.
+// byte-identical output. Profile your own caller before moving off the default.
 typedef enum {
     // aux_stream unused; the whole chain runs on user_stream.
     HIP_COMPRESS_AUX_NONE = 0,
@@ -101,6 +96,11 @@ struct hipCompressPlan {
     // (but not while compress_pending is true) to move the split per snapshot.
     hipCompressAuxStage aux_from;
     hipEvent_t  ready_event;
+    // Last user stream that accessed plan workspace. Calls on the same stream
+    // are naturally ordered. A stream change records ready_event on this
+    // stream and waits for it on the new stream.
+    hipStream_t workspace_stream;
+    bool workspace_stream_valid;
     size_t* h_staging;  // pinned host, 2 values: [offsets[nb-1], sizes[nb-1]]
 
     // Stream the D2H readback of the pending compress was enqueued on, i.e. the
@@ -132,9 +132,6 @@ inline void hipCompressWaveletDims(int wx, int wy, int wz,
 // Plan owns internal buffers and an event for stream bridging.
 // aux_stream runs the stages selected by aux_from. User-owned, shareable across
 // plans. One plan must not be used concurrently from multiple host threads.
-// All API calls using one plan must use the same user_stream. To change user
-// streams, the caller must order the old stream before the new one. Synchronize
-// the last user stream before destroying the plan.
 // Compress is exclusive (writes plan buffers).
 hipError_t hipCompressCreatePlan(
     hipCompressPlan** plan,
@@ -143,6 +140,9 @@ hipError_t hipCompressCreatePlan(
     hipCompressKernel kernel = HIP_COMPRESS_KERNEL_AUTO,
     hipCompressAuxStage aux_from = HIP_COMPRESS_AUX_FROM_COMPACT);
 
+// Waits for the work still queued on the last user stream, and on the pending
+// compress stream if one is pending, then frees the plan. Both streams must
+// still exist. Destroy the plan before you destroy those streams.
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 
 // Copy from a strided source volume to a 32-divisible wavelet-layout buffer.
@@ -156,7 +156,8 @@ hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 //
 // d_dst may be NULL (RMS-only mode). d_rms_out may be NULL (copy-only mode).
 // Both NULL is an error.
-// All GPU work is enqueued on user_stream.
+// All GPU work is enqueued on user_stream. Calls using one plan are ordered
+// through an internal event because RMS modes share plan workspace.
 hipError_t hipCopyToWaveletLayout(
     const float* d_src,
     int ldimx, int ldimxy,
@@ -183,7 +184,8 @@ hipError_t hipComputeRMS(
 // Copy from a wavelet-layout buffer back to a strided destination volume.
 // Only the ex*ey*ez extraction samples are written; padding is skipped.
 // Wavelet dims are derived from the extraction window.
-// All GPU work is enqueued on user_stream.
+// All GPU work is enqueued on user_stream. Calls using one plan are ordered
+// through the same internal event as copy, compress, and decompress.
 hipError_t hipCopyFromWaveletLayout(
     const float* d_src,
     float* d_dst,
@@ -202,6 +204,8 @@ hipError_t hipCopyFromWaveletLayout(
 //   d_rms != NULL: mulfac = 1 / (rms * scale).  scale is the error tolerance;
 //                  smaller scale → finer quantization → lower error, lower CR.
 //   d_rms == NULL: mulfac = scale.  Caller supplies mulfac directly.
+// If rms * scale is <= 0, or its reciprocal is not finite, mulfac is 1.0.
+// scale must be positive and finite (HIP_COMPRESS_ERROR_INVALID_SCALE).
 //
 // The fused wavelet + quantize + significance pass always runs on user_stream.
 // Which of the later stages run on aux_stream is set by plan->aux_from (see

@@ -3,21 +3,20 @@
 > **Experimental / Proof of Concept** — APIs are unstable and may change without
 > notice. Optimizations are ongoing. Not tested in an integrated production
 > setting. No backward compatibility guarantee for the compressed bitstream
-> format. Compression ratios differ from the CPU reference due to different
-> block tiling strategies.
+> format. Compression ratios differ from the CPU reference because the GPU uses
+> octree/quadtree significance coding and the CPU uses run-length encoding.
 
 GPU-accelerated lossy compression for 2D and 3D floating-point volumes on AMD
 Instinct GPUs (MI200, MI300, MI355). Targets seismic imaging workloads where
-wavefield snapshots must be stored and retrieved at GPU memory bandwidth.
+wavefield snapshots are stored and retrieved on the GPU.
 
 The pipeline applies the DS 7/9 wavelet transform, quantizes the coefficients,
 and codes their significance and values. The coder is selectable per plan; the default
 resolves to octree for 3D and quadtree for 2D.
-Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 
 The API can move the scan, compaction, and readback tail to a separate stream.
 The best stream placement depends on the caller's GPU workload. Profile the
-integrated pipeline instead of assuming overlap will hide compression.
+integrated pipeline.
 
 ## Requirements
 
@@ -30,7 +29,8 @@ integrated pipeline instead of assuming overlap will hide compression.
 ```bash
 module load rocm/7.2.1
 
-# Build the CPU reference library (needed by tests)
+# Build the CPU reference library (linked by test_compress_api_hip and
+# test_async_overlap_3d)
 make libcvxcompress.so
 
 # Build the retained correctness suites and performance benchmark
@@ -43,6 +43,30 @@ make HIP_ARCH=gfx942 bench_encode_full
 
 Set `HIP_ARCH` to match your target: `gfx90a` for MI200, `gfx942` for MI300X,
 or `gfx950` for MI355X.
+
+### Running the tests and benchmarks
+
+Run each binary from the repository root, for example `./build/test_compress_api_hip`.
+
+`test_compress_api_hip` runs the 39 API tests first. The exit code reports only
+those tests. With no arguments, it then runs three benchmarks:
+
+- `bench_copy_kernels`: copy and RMS kernel bandwidth.
+- `bench_throughput`: full compress and decompress throughput in GiB/s (2^30
+  bytes per second) on eight 3D grids from 32^3 to 512^3. The input is a sine field
+  whose period P divides the 32-sample wavelet block, so every block is
+  identical and the compression ratio does not change with grid size. The sweep
+  runs P = 32, 16, 8, 4, 2. A smaller P means a higher frequency and more
+  nonzero coefficients.
+- `bench_radial_sinc_sweep`: GPU and CPU compression ratio, throughput, and
+  error on a radial sinc field.
+
+A numeric argument, such as `./build/test_compress_api_hip 4`, skips everything
+else and runs only the pointer-shift alignment test with that byte shift.
+
+`bench_encode_full` takes `nx ny nz iterations codec` (defaults 512 512 512 200,
+codec AUTO). For example, `./build/bench_encode_full 256 256 256 50 0` times the
+octree codec at 256^3.
 
 ## API Overview
 
@@ -77,6 +101,7 @@ All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
 
 | Function | Description |
 |----------|-------------|
+| `hipCompressBufferSize` | Size in bytes of the uncompressed wavelet-layout buffer (for allocation) |
 | `hipCompressMaxOutputSize` | Upper bound on compressed output size (for allocation) |
 | `hipCompressWaveletDims` | Round dimensions up to multiples of 32 |
 | `hipCompressGetLastError` | Library-specific error code from last call |
@@ -181,8 +206,7 @@ round up arbitrary window sizes. The wavelet buffer is a contiguous
 `hipCopyToWaveletLayout` copies `ex × ey × ez` samples starting at origin
 `(x0, y0, z0)` in the source grid. The wavelet buffer is `wnx × wny × wnz`
 (rounded up to multiples of 32). Positions beyond the extraction window are
-zero-filled — zero padding yields better compression ratios than mirror padding
-(20–55% smaller compressed output for non-multiple-of-32 volumes).
+zero-filled.
 
 ### Scale Parameter
 
@@ -193,16 +217,20 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
   error, lower compression ratio.
 - Without RMS (`d_rms == NULL`): `scale` is used directly as the quantization
   multiplier.
+- If `rms × scale` is zero or negative, or its reciprocal is not finite, the
+  multiplier is `1.0`. For example, an all-zero input has `rms = 0`.
+- `scale` must be positive and finite. Otherwise `hipCompress` fails with
+  `HIP_COMPRESS_ERROR_INVALID_SCALE`.
 
 ### Kernel Variants
 
 | Variant | Enum | Dims | Description |
 |---------|------|------|-------------|
 | Auto      | `HIP_COMPRESS_KERNEL_AUTO`     | 2D/3D | **Default.** Resolves to quadtree for 2D (`nz == 1`) and octree for 3D |
-| Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding. Best compression ratio and fastest decode; recommended for storage/archival |
+| Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding |
 | Quadtree  | `HIP_COMPRESS_KERNEL_QUADTREE` | 2D    | Quadtree significance coder with per-block PFOR value coding -- the 2D counterpart of octree |
 
-The codec is selected **at runtime, per plan** via the last argument of
+The codec is selected **at runtime, per plan** via the `kernel` argument of
 `hipCompressCreatePlan` — it is an ordinary function parameter, so switching
 between codecs requires **no recompilation** of the library or the application:
 
@@ -210,7 +238,7 @@ between codecs requires **no recompilation** of the library or the application:
 // default (kernel arg omitted) → auto: octree for 3D, quadtree for 2D
 hipCompressCreatePlan(&plan_def, nx, ny, nz, aux);
 
-// storage-oriented volume → octree (best ratio) — explicit form of the 3D default
+// octree — explicit form of the 3D default
 hipCompressCreatePlan(&plan_oct, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_OCTREE);
 
 ```
@@ -237,8 +265,7 @@ where *transform* is the fused wavelet + quantize + significance pass and
 *encode* is the entropy coder.
 
 - **`user_stream`**: passed to each API call. The transform always runs here; it
-  is bandwidth-bound and reads the caller's live input buffer, so moving it off
-  `user_stream` only steals HBM from the caller. The stream is free as soon as
+  reads the caller's live input buffer. The stream is free as soon as
   the stages that stayed on it have been enqueued.
 - **`aux_stream`**: owned by the user, passed at plan creation. Shared across
   plans. Which stages it picks up is set by the `aux_from` argument to
@@ -254,24 +281,16 @@ An internal event bridges the two streams at whichever boundary `aux_from`
 selects. This lets simulation kernels continue on `user_stream` while the tail
 of compression finishes on `aux_stream`.
 
-The plan does not currently bridge work when consecutive API calls pass
-different `user_stream` values. Keep one plan on one user stream. To change
-streams, record an event on the old user stream and wait for it on the new
-stream before the next call. Synchronize the last user stream before destroying
-the plan. See [issue #11](https://github.com/AMD-HPC/CvxCompress/issues/11).
-
 `aux_from` is a **placement** knob, not a correctness one: all three settings
-produce byte-identical output. It is also not a free win. Measured against a
-wave propagation kernel that already saturates the GPU (512³ TTI, snapshot every
-7 steps, MI355X), `FROM_ENCODE` runs 3–4% *slower* than `NONE` — the entropy
-coder is a throughput kernel with no idle slack to reclaim, so co-residency costs
-more than the hiding saves. Profile your own caller before moving off the
+produce byte-identical output. Profile your own caller before moving off the
 default. Passing the same stream as both `aux_stream` and `user_stream` makes the
 split a no-op regardless of `aux_from`.
 
 ## Error Handling
 
-All API functions return `hipError_t`. For library-specific diagnostics:
+The GPU API functions return `hipError_t`. `hipCompressGetLastError` returns
+the library error code for a plan, and `hipCompressErrorString` turns that code
+into text. For library-specific diagnostics:
 
 ```cpp
 hipError_t err = hipCompress(...);
@@ -280,6 +299,16 @@ if (err != hipSuccess) {
     fprintf(stderr, "compress failed: %s\n", hipCompressErrorString(detail));
 }
 ```
+
+`hipCompressCreatePlan` returns `hipErrorOutOfMemory` and sets
+`HIP_COMPRESS_ERROR_MEMORY_ALLOCATION` when the device cannot hold the plan's
+buffers. When creation fails, the plan pointer is still set so you can read the
+error code. Pass it to `hipCompressDestroyPlan` to release it.
+
+The library calls `hipGetLastError()` after kernel launches. This clears any HIP
+error still pending on the calling host thread, and it can report that earlier
+error as the failure of the library call. Read your own pending error before you
+call the library.
 
 ## Limitations
 
@@ -296,9 +325,14 @@ if (err != hipSuccess) {
 - **Wavefield values**: compression input must contain finite `float` values.
   NaN and infinity are outside the API contract.
 - **Concurrency**: a plan must not be used from multiple host threads. One
-  `hipCompress` must be synchronized before the next. All calls using one plan
-  must pass the same `user_stream` unless the caller explicitly orders a stream
-  change. Copy and RMS modes share plan-owned workspace and can race otherwise.
+  `hipCompress` must be synchronized before the next. `hipDecompress` also
+  fails with `hipErrorNotReady` while a compress is pending. Sequential calls may use
+  different user streams; the plan orders copy, RMS, compress, and decompress
+  work through an internal event. The plan remembers the last user stream by
+  its handle. `hipCompressDestroyPlan` waits on that stream, so destroy the plan
+  before you destroy the stream. Do not reuse a destroyed stream's handle for a
+  new stream while the plan is alive, because the plan would treat the new
+  stream as the old one and skip the ordering.
 - **Data type**: `float` only (single precision).
 
 ## File Structure
@@ -307,17 +341,18 @@ if (err != hipSuccess) {
 hip/
   hipCompress.h                  Public API header
   hipCompress.cpp                API implementation
-  hipCompact.h                   Compact stream header and scan helpers
+  hipCompact.h                   Scan temp-size helper for compaction
   hipBlockCopy.h                 CopyTo / CopyFrom kernels
+  hipPlaneIO.h                   64-bit plane load/store helpers
   hipCodecCommon.h               Shared quantization and width helpers
-  hipWaveletBitmap.h             Bitmap significance split and inverse transform
-  hipWaveletOctree.h             Octree significance coder + shared inverse stage
+  hipWaveletBitmap.h             Forward wavelet + quantize kernel, bitmap significance split
+  hipWaveletOctree.h             Octree significance coder, stream header size, 3D inverse stage
   hipWaveletQuadtree2D.h         Quadtree coder and 2D transform
   ds79.h                         DS 7/9 wavelet filter coefficients and transforms
   ds79_reg32.inc                 Unrolled forward wavelet (32-point)
   us79_reg32.inc                 Unrolled inverse wavelet (32-point)
 tests/
-  hip_test_common.h              Shared HIP test error handling
+  hip_test_common.h              Shared HIP error check and spin kernel for tests
   test_compress_api_hip.cpp      3D API regression suite
   test_compress_2d_hip.cpp       2D quadtree regression suite
   test_async_overlap_3d.cpp      Async stream correctness and overlap

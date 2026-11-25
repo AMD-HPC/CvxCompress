@@ -19,12 +19,12 @@ https://library.seg.org/doi/pdf/10.1190/1.1826518
 > - Not tested in an integrated production setting
 > - No backward compatibility guarantee for the compressed bitstream format
 > - AMD GPUs only (ROCm 7.x, gfx90a/gfx942/gfx950)
-> - Compression ratios differ from the CPU reference due to different block tiling strategies
+> - Compression ratios differ from the CPU reference because the GPU uses octree/quadtree significance coding and the CPU uses run-length encoding
 
 See [HIP_API.md](HIP_API.md) for the AMD GPU port of this library targeting
 MI200/MI300X/MI355X via HIP. It implements a fused wavelet + quantization +
 significance coding pipeline in GPU kernels (default: octree for 3D,
-quadtree for 2D), with matching error norms to floating-point rounding.
+quadtree for 2D).
 Includes API reference, usage examples, and async pipeline integration.
 
 # Building

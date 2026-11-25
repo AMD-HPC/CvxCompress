@@ -41,13 +41,13 @@ __host__ __device__ __forceinline__ int woct_L_to_spatial(int L) {
     return yr * 32 + (xg * 4 + x_off);   // spatial index iy*32+ix
 }
 
-// The production encoder and decoder process one z-line per thread.
+// The encoder and decoder process one z-line per thread.
 static constexpr int WOCT_PAR_THREADS = 1024;
 
 // Fast inclusive scan of occ[0..N)->r[0..N) (lidx order), N in {8,64,512,4096}.
 // Uses a blocked layout (thread t owns the contiguous chunk [t*C, t*C+C), C=N/1024
-// rounded up) so a single wave64 DPP block scan (wbmp_opt::block_exscan) replaces
-// the ~log2(N) Hillis-Steele passes.  r[n] holds the inclusive prefix at n exactly
+// rounded up) and a single wave64 DPP block scan (wbmp_opt::block_exscan) does
+// the work.  r[n] holds the inclusive prefix at n exactly
 // as the occupancy input, so downstream uses rank = r[n]-occ[n].
 // Returns the total occupancy. warp_part is 2*16 ints.
 __device__ __forceinline__ int
@@ -383,8 +383,8 @@ __global__ void hipcvx_woctCompactKernel(
 //   sig_bytes — significance-region length (octree stream length, or 4096 flat)
 //   out       — this block's WBMP_SLOT_BYTES scratch slot
 //   bsz_this  — optional: receives WBMP_BITMAP_BYTES + nnz*4 (may be null)
-// Addressing is caller-supplied so the same body serves both the fixed-stride
-// prototype kernel and the header-addressed (compacted stream) API kernel.
+// Addressing is caller-supplied: the caller passes the block's coded bytes and
+// scratch slot.
 __device__ __forceinline__ void woct_decode_block_to_scratch(
     const unsigned char* __restrict__ blk, int sig_bytes,
     unsigned char* __restrict__ out, size_t* __restrict__ bsz_this)

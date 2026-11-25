@@ -5,7 +5,6 @@
 // Full-encode throughput: times hipCompress + hipCompressSynchronize
 // end-to-end (wavelet transform, entropy coding, scan, compact, D2H readback).
 // RMS is computed once outside the loop so quantization is realistic.
-// Set HIP_CVX_SADDR to route the forward kernel through the saddr variant.
 
 #include <cstdio>
 #include <cstdlib>
@@ -70,13 +69,12 @@ int main(int argc, char** argv)
 
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
     double gbps = (double)total * sizeof(float) / (ms * 1.0e-3) / 1.0e9;
-    const char* mode = getenv("HIP_CVX_SADDR") ? "saddr" : "buffer";
 
     printf("codec=%d ", (int)kern);
-    printf("mode=%-6s dims=%dx%dx%d  encode: %.4f ms  %.1f GB/s  len=%ld CR=%.2f\n",
-           mode, nx, ny, nz, ms, gbps, len, cr);
+    printf("dims=%dx%dx%d  encode: %.4f ms  %.1f GB/s  len=%ld CR=%.2f\n",
+           nx, ny, nz, ms, gbps, len, cr);
 
-    hipFree(d_in); hipFree(d_out); hipFree(d_rms);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_rms));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return 0;
 }

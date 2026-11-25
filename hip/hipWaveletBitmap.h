@@ -5,8 +5,8 @@
 #ifndef HIPWAVELET_BITMAP_H
 #define HIPWAVELET_BITMAP_H
 
-// PROTOTYPE: significance-map (bitmap) + packed-value split of the fused
-// wavelet+quantize encode.  This is kernel 1 of a two-kernel design:
+// Significance-map (bitmap) + packed-value split of the fused wavelet+quantize
+// encode.  This is kernel 1 of a two-kernel design:
 //
 //   kernel 1 (this file): wavelet ZYX + quantize -> per block:
 //       [ 4096 B bitmap : 1024 x uint32, one significance word per z-line ]

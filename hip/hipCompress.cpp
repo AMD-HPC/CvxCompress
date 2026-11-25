@@ -29,6 +29,36 @@
     } \
 } while(0)
 
+// Like HIPCHECK_PLAN for allocations. An out-of-memory failure is recorded as
+// HIP_COMPRESS_ERROR_MEMORY_ALLOCATION. The hipError_t is returned unchanged.
+#define HIPALLOC_PLAN(p, cmd) do { \
+    hipError_t _e = (cmd); \
+    if (_e != hipSuccess) { \
+        (p)->last_error = (_e == hipErrorOutOfMemory) \
+            ? HIP_COMPRESS_ERROR_MEMORY_ALLOCATION \
+            : HIP_COMPRESS_ERROR_HIP_RUNTIME; \
+        return _e; \
+    } \
+} while(0)
+
+// Plan workspace follows the caller's user stream. Work already queued on the
+// same stream needs no event. When the caller changes streams, bridge all prior
+// work to the new stream before it can reuse plan-owned buffers.
+static hipError_t hipCompressUseWorkspaceStream(
+    hipCompressPlan* plan, hipStream_t stream)
+{
+    if (plan->workspace_stream_valid && plan->workspace_stream != stream) {
+        hipError_t err = hipEventRecord(
+            plan->ready_event, plan->workspace_stream);
+        if (err != hipSuccess) return err;
+        err = hipStreamWaitEvent(stream, plan->ready_event, 0);
+        if (err != hipSuccess) return err;
+    }
+    plan->workspace_stream = stream;
+    plan->workspace_stream_valid = true;
+    return hipSuccess;
+}
+
 // Opt-in diagnostics: set HIPCOMPRESS_DEBUG=1 for scheme + result lines,
 // HIPCOMPRESS_DEBUG=2 to also dump device-memory allocation detail.  The
 // environment is read once and cached, so a disabled build pays only a single
@@ -151,6 +181,8 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     p->pending_stream = aux_stream;
     p->compress_pending = false;
     p->compress_data_ready = false;
+    p->workspace_stream = nullptr;
+    p->workspace_stream_valid = false;
     p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
 
     if (is_2d) {
@@ -172,36 +204,36 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     int nb = p->num_blocks;
     size_t scratch_size = (size_t)nb * p->scratch_slot_stride;
 
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_scratch, scratch_size));
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_block_sizes, nb * sizeof(size_t)));
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_block_offsets, nb * sizeof(size_t)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_scratch, scratch_size));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_block_sizes, nb * sizeof(size_t)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_block_offsets, nb * sizeof(size_t)));
 
     if (kernel == HIP_COMPRESS_KERNEL_OCTREE) {
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_coded,
                                    (size_t)nb * WOCT_CODE_SLOT_BYTES));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
     } else if (kernel == HIP_COMPRESS_KERNEL_QUADTREE) {
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_coded,
                                    (size_t)nb * WQT2D_CODE_SLOT_BYTES));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
     }
 
     p->scan_temp_bytes = 0;
     hipError_t err = hipCompressCompactScanTempSize(nb, &p->scan_temp_bytes);
     if (err != hipSuccess) { p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME; return err; }
 
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_scan_temp, p->scan_temp_bytes));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_scan_temp, p->scan_temp_bytes));
 
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_rms, sizeof(double)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_rms, sizeof(double)));
 
     p->max_copy_blocks = (int)copy_blocks;
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_partial_sums, p->max_copy_blocks * sizeof(double)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_partial_sums, p->max_copy_blocks * sizeof(double)));
 
     HIPCHECK_PLAN(p, hipEventCreateWithFlags(&p->ready_event, hipEventDisableTiming));
-    HIPCHECK_PLAN(p, hipHostMalloc(&p->h_staging, 2 * sizeof(size_t)));
+    HIPALLOC_PLAN(p, hipHostMalloc(&p->h_staging, 2 * sizeof(size_t)));
 
     // JIT warmup: exclusive_scan on aux_stream
     err = rocprim::exclusive_scan(
@@ -243,8 +275,8 @@ hipError_t hipCompressDestroyPlan(hipCompressPlan* plan)
     if (!plan) return hipErrorInvalidValue;
     if (plan->compress_pending)
         (void)hipStreamSynchronize(plan->pending_stream);
-    if (plan->ready_event)
-        (void)hipEventSynchronize(plan->ready_event);
+    if (plan->workspace_stream_valid)
+        (void)hipStreamSynchronize(plan->workspace_stream);
     (void)hipFree(plan->d_scratch);
     (void)hipFree(plan->d_mulfac);
     (void)hipFree(plan->d_block_sizes);
@@ -298,7 +330,7 @@ hipError_t hipCompress(
     // OCTREE and QUADTREE carry a per-block significance-size table.
     const int hdr_size = hipOctreeHeaderSize(nb, num_mulfacs);
     hipStream_t s = user_stream;
-    HIPCHECK_PLAN(plan, hipStreamWaitEvent(s, plan->ready_event, 0));
+    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, s));
     // AUX_NONE collapses aux onto the user stream, which makes every "aux"
     // launch below run in order on s and turns bridge() into a no-op.
     hipStream_t aux = (plan->aux_from == HIP_COMPRESS_AUX_NONE)
@@ -309,8 +341,7 @@ hipError_t hipCompress(
     hipStream_t enc = (plan->aux_from == HIP_COMPRESS_AUX_FROM_ENCODE) ? aux : s;
 
     // Bridge to aux_stream. The transform (wavelet + quantize + significance)
-    // never moves: it is bandwidth-bound and reads the caller's live input, so
-    // overlapping it would only steal HBM from the caller.
+    // never moves: it reads the caller's live input, so it stays on user_stream.
     //
     // Fires once, at the boundary plan->aux_from selects: before the entropy
     // coder at FROM_ENCODE, otherwise at the trailing call below (which also
@@ -505,6 +536,10 @@ hipError_t hipCopyToWaveletLayout(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH, hipErrorInvalidValue);
 
     hipStream_t s = user_stream;
+    // Copy/RMS uses plan-owned partial sums and commonly writes plan->d_rms.
+    // Bridge only when the caller changes streams; same-stream work is already
+    // ordered and should not pay an event-record cost.
+    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, s));
     bool do_copy = (d_dst != nullptr);
     bool do_rms  = (d_rms_out != nullptr);
     long total_samples = (long)ex * ey * ez;
@@ -592,6 +627,7 @@ hipError_t hipCopyFromWaveletLayout(
     if (wnx != plan->nx || wny != plan->ny || wnz != plan->nz)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH, hipErrorInvalidValue);
 
+    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, user_stream));
     dim3 grid(wnx / 32, wny / 32, (wnz + BCOPY_ZPB - 1) / BCOPY_ZPB);
     hipcvx_copyFromWaveletKernelOpt<<<grid, 256, 0, user_stream>>>(
         d_src, wnx, wny, wnz,
@@ -621,8 +657,7 @@ hipError_t hipDecompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
                    hipErrorInvalidValue);
 
-    HIPCHECK_PLAN(plan, hipStreamWaitEvent(
-        user_stream, plan->ready_event, 0));
+    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, user_stream));
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int ldimx = nx;
@@ -656,11 +691,6 @@ hipError_t hipDecompress(
     hipError_t launch_err = hipGetLastError();
     if (launch_err != hipSuccess)
         plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
-    if (launch_err == hipSuccess) {
-        launch_err = hipEventRecord(plan->ready_event, user_stream);
-        if (launch_err != hipSuccess)
-            plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
-    }
     return launch_err;
 }
 

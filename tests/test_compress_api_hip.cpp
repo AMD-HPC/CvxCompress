@@ -87,7 +87,7 @@ static bool test_plan_lifecycle()
     // Invalid: not multiple of 32
     plan = nullptr;
     err = hipCompressCreatePlan(&plan, 100, 128, 128, 0);
-    if (err == hipSuccess) { printf("  FAIL: should reject nx=100\n"); hipCompressDestroyPlan(plan); return false; }
+    if (err == hipSuccess) { printf("  FAIL: should reject nx=100\n"); HIPCHECK(hipCompressDestroyPlan(plan)); return false; }
     printf("  reject non-32-multiple: PASS\n");
 
     // MaxOutputSize for the default 3D codec.
@@ -95,16 +95,16 @@ static bool test_plan_lifecycle()
     if (err != hipSuccess) { printf("  FAIL: create 64^3 plan\n"); return false; }
     size_t max_sz = 0;
     HIPCHECK(hipCompressMaxOutputSize(plan, &max_sz));
-    if (max_sz == 0) { printf("  FAIL: MaxOutputSize=0\n"); hipCompressDestroyPlan(plan); return false; }
+    if (max_sz == 0) { printf("  FAIL: MaxOutputSize=0\n"); HIPCHECK(hipCompressDestroyPlan(plan)); return false; }
     printf("  MaxOutputSize=%zu: PASS\n", max_sz);
 
     // BufferSize
     size_t buf_sz = 0;
     HIPCHECK(hipCompressBufferSize(plan, &buf_sz));
     size_t expected_buf = (size_t)64 * 64 * 64 * sizeof(float);
-    if (buf_sz != expected_buf) { printf("  FAIL: BufferSize=%zu expected=%zu\n", buf_sz, expected_buf); hipCompressDestroyPlan(plan); return false; }
+    if (buf_sz != expected_buf) { printf("  FAIL: BufferSize=%zu expected=%zu\n", buf_sz, expected_buf); HIPCHECK(hipCompressDestroyPlan(plan)); return false; }
     printf("  BufferSize=%zu: PASS\n", buf_sz);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipCompressDestroyPlan(plan));
 
     // BufferSize with non-cubic dimensions
     err = hipCompressCreatePlan(&plan, 128, 64, 32, 0);
@@ -112,9 +112,9 @@ static bool test_plan_lifecycle()
     buf_sz = 0;
     HIPCHECK(hipCompressBufferSize(plan, &buf_sz));
     expected_buf = (size_t)128 * 64 * 32 * sizeof(float);
-    if (buf_sz != expected_buf) { printf("  FAIL: BufferSize 128x64x32=%zu expected=%zu\n", buf_sz, expected_buf); hipCompressDestroyPlan(plan); return false; }
+    if (buf_sz != expected_buf) { printf("  FAIL: BufferSize 128x64x32=%zu expected=%zu\n", buf_sz, expected_buf); HIPCHECK(hipCompressDestroyPlan(plan)); return false; }
     printf("  BufferSize 128x64x32=%zu: PASS\n", buf_sz);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipCompressDestroyPlan(plan));
 
     return true;
 }
@@ -167,8 +167,8 @@ static bool test_round_trip()
     bool pass = (max_err < rms) && (cr > 1.0f);
     printf("  round-trip: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -214,8 +214,8 @@ static bool test_octree_round_trip()
     bool pass = (max_err < rms) && (cr > 1.0f) && (len > 0);
     printf("  octree round-trip: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_comp);
-    hipCompressDestroyPlan(oct);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipCompressDestroyPlan(oct));
     return pass;
 }
 
@@ -263,8 +263,8 @@ static bool test_direct_scale_round_trip()
     printf("  mulfac=%.1f stored=%.1f extreme=%s: %s\n",
            mulfac, stored_mulfac, extreme_ok ? "ok" : "FAIL",
            pass ? "PASS" : "FAIL");
-    hipFree(d_input); hipFree(d_output); hipFree(d_comp);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -312,8 +312,8 @@ static bool test_varying_scale()
     }
     printf("  varying scale: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -359,8 +359,8 @@ static bool test_multiple_cycles()
     }
     printf("  multiple cycles: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -402,8 +402,8 @@ static bool test_determinism()
     printf("  len1=%ld, len2=%ld, byte-identical=%s\n", len1, len2, pass ? "yes" : "no");
     printf("  determinism: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_comp1); hipFree(d_comp2);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_comp1)); HIPCHECK(hipFree(d_comp2));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -446,10 +446,10 @@ static bool test_nondefault_stream_roundtrip()
     bool pass = (max_err < rms) && (cr > 1.0f);
     printf("  CR=%.2f, max_err=%.4e, rel=%.4e: %s\n", cr, max_err, max_err / rms, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(stream);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(stream));
     return pass;
 }
 
@@ -494,8 +494,8 @@ static bool test_back_to_back_compress()
     bool pass = (max_err < rms) && (len1 != len2);
     printf("  len1=%ld, len2=%ld, max_err=%.4e: %s\n", len1, len2, max_err, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -551,9 +551,9 @@ static bool test_back_to_back_decompress()
            max1, max2, max3, (max1 == max2 && max2 == max3) ? "yes" : "no",
            pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_out1); hipFree(d_out2); hipFree(d_out3); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(s1); hipStreamDestroy(s2); hipStreamDestroy(s3);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_out1)); HIPCHECK(hipFree(d_out2)); HIPCHECK(hipFree(d_out3)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(s1)); HIPCHECK(hipStreamDestroy(s2)); HIPCHECK(hipStreamDestroy(s3));
     return pass;
 }
 
@@ -597,10 +597,10 @@ static bool test_pipeline_ordering()
     bool pass = (max_err < rms) && (lenA != lenB);
     printf("  lenA=%ld, lenB=%ld, err_vs_B=%.4e: %s\n", lenA, lenB, max_err, pass ? "PASS" : "FAIL");
 
-    hipFree(d_inputA); hipFree(d_inputB); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(stream);
+    HIPCHECK(hipFree(d_inputA)); HIPCHECK(hipFree(d_inputB)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(stream));
     return pass;
 }
 
@@ -657,11 +657,11 @@ static bool test_two_plans_two_streams()
     bool pass = (err1 < rms1) && (err2 < rms2);
     printf("  stream1: err=%.4e  stream2: err=%.4e: %s\n", err1, err2, pass ? "PASS" : "FAIL");
 
-    hipFree(d_in1); hipFree(d_in2); hipFree(d_out1); hipFree(d_out2);
-    hipFree(d_comp1); hipFree(d_comp2);
-    hipCompressDestroyPlan(plan1); hipCompressDestroyPlan(plan2);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(s1); hipStreamDestroy(s2);
+    HIPCHECK(hipFree(d_in1)); HIPCHECK(hipFree(d_in2)); HIPCHECK(hipFree(d_out1)); HIPCHECK(hipFree(d_out2));
+    HIPCHECK(hipFree(d_comp1)); HIPCHECK(hipFree(d_comp2));
+    HIPCHECK(hipCompressDestroyPlan(plan1)); HIPCHECK(hipCompressDestroyPlan(plan2));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(s1)); HIPCHECK(hipStreamDestroy(s2));
     return pass;
 }
 
@@ -713,11 +713,11 @@ static bool test_async_decompress()
     printf("  err=%.4e: %s (async=%s)\n", max_err, pass ? "PASS" : "FAIL",
            async_ok ? "yes" : "no");
 
-    hipEventDestroy(ev);
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(stream);
+    HIPCHECK(hipEventDestroy(ev));
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(stream));
     return pass;
 }
 
@@ -759,10 +759,10 @@ static bool test_stream_ordering_no_sync()
     bool pass = (max_err < rms) && (cr > 1.0f);
     printf("  CR=%.2f, err=%.4e: %s\n", cr, max_err, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(stream);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(stream));
     return pass;
 }
 
@@ -806,8 +806,8 @@ static bool test_compressed_length_accuracy()
     bool pass = (max_err < rms);
     printf("  len=%ld, err=%.4e: %s\n", len, max_err, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed); hipFree(d_compressed2);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed)); HIPCHECK(hipFree(d_compressed2));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -821,39 +821,39 @@ static bool test_multithread_separate_plans()
 
     auto worker = [&](float k, ThreadResult* result) {
         hipStream_t stream, aux;
-        hipStreamCreate(&stream);
-        hipStreamCreateWithFlags(&aux, hipStreamNonBlocking);
+        HIPCHECK(hipStreamCreate(&stream));
+        HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
         hipCompressPlan* plan = nullptr;
-        hipCompressCreatePlan(&plan, N, N, N, aux);
+        HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, aux));
 
         float *d_in, *d_out;
         unsigned char* d_comp;
-        hipMalloc(&d_in, total * sizeof(float));
-        hipMalloc(&d_out, total * sizeof(float));
+        HIPCHECK(hipMalloc(&d_in, total * sizeof(float)));
+        HIPCHECK(hipMalloc(&d_out, total * sizeof(float)));
         size_t cs = 0;
-        hipCompressMaxOutputSize(plan, &cs);
-        hipMalloc(&d_comp, cs);
+        HIPCHECK(hipCompressMaxOutputSize(plan, &cs));
+        HIPCHECK(hipMalloc(&d_comp, cs));
 
         int thr = 256, blk = (total + thr - 1) / thr;
         initSinKernel<<<blk, thr, 0, stream>>>(d_in, N, N, N, k, k, k);
 
         long len = 0;
-        compressWithAutoRMS(scale, d_in, d_comp, &len, &result->cr, plan, stream);
-        hipDecompress(d_comp, d_out, plan, stream);
-        hipStreamSynchronize(stream);
+        HIPCHECK(compressWithAutoRMS(scale, d_in, d_comp, &len, &result->cr, plan, stream));
+        HIPCHECK(hipDecompress(d_comp, d_out, plan, stream));
+        HIPCHECK(hipStreamSynchronize(stream));
 
         std::vector<float> h_in(total), h_out(total);
-        hipMemcpy(h_in.data(), d_in, total * sizeof(float), hipMemcpyDeviceToHost);
-        hipMemcpy(h_out.data(), d_out, total * sizeof(float), hipMemcpyDeviceToHost);
+        HIPCHECK(hipMemcpy(h_in.data(), d_in, total * sizeof(float), hipMemcpyDeviceToHost));
+        HIPCHECK(hipMemcpy(h_out.data(), d_out, total * sizeof(float), hipMemcpyDeviceToHost));
 
         result->rms = hostRMS(h_in.data(), total);
         result->max_err = maxAbsError(h_in.data(), h_out.data(), total);
         result->ok = (result->max_err < result->rms) && (result->cr > 1.0f);
 
-        hipFree(d_in); hipFree(d_out); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
-        hipStreamDestroy(aux);
-        hipStreamDestroy(stream);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
+        HIPCHECK(hipStreamDestroy(aux));
+        HIPCHECK(hipStreamDestroy(stream));
     };
 
     ThreadResult r1{}, r2{};
@@ -877,7 +877,7 @@ static bool test_compress_pending_guard()
 
     if (plan->compress_pending) {
         printf("  FAIL: compress_pending=true at start\n");
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -897,8 +897,8 @@ static bool test_compress_pending_guard()
         plan->last_error != HIP_COMPRESS_ERROR_NO_COMPRESS_DATA ||
         untouched_len != -1 || untouched_cr != -1.0f) {
         printf("  FAIL: getter succeeded or changed outputs before compression\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -907,8 +907,8 @@ static bool test_compress_pending_guard()
 
     if (!plan->compress_pending) {
         printf("  FAIL: compress_pending=false after hipCompress\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -917,9 +917,9 @@ static bool test_compress_pending_guard()
     if (err != hipErrorNotReady ||
         plan->last_error != HIP_COMPRESS_ERROR_NO_COMPRESS_DATA) {
         printf("  FAIL: getter succeeded before synchronization\n");
-        hipCompressSynchronize(plan, nullptr, nullptr);
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -927,9 +927,9 @@ static bool test_compress_pending_guard()
     err = hipCompress(5e-2f, plan->d_rms, d_in, d_comp, plan, 0);
     if (err != hipErrorNotReady) {
         printf("  FAIL: second hipCompress not rejected (err=%d)\n", (int)err);
-        hipCompressSynchronize(plan, nullptr, nullptr);
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -938,8 +938,8 @@ static bool test_compress_pending_guard()
 
     if (plan->compress_pending || !plan->compress_data_ready) {
         printf("  FAIL: incorrect state after split synchronization\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -951,8 +951,8 @@ static bool test_compress_pending_guard()
     HIPCHECK(hipCompressGetData(plan, &len_again, &cr_again));
     if (len <= 0 || cr <= 0.0f || len_again != len || cr_again != cr) {
         printf("  FAIL: split getter returned inconsistent data\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -961,8 +961,8 @@ static bool test_compress_pending_guard()
     if (err != hipErrorNotReady ||
         plan->last_error != HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING) {
         printf("  FAIL: split Synchronize on idle plan did not return hipErrorNotReady\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -971,9 +971,9 @@ static bool test_compress_pending_guard()
     err = hipCompressGetData(plan, nullptr, nullptr);
     if (err != hipErrorNotReady) {
         printf("  FAIL: getter retained stale data during a new compression\n");
-        hipCompressSynchronize(plan, nullptr, nullptr);
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipCompressSynchronize(plan, nullptr, nullptr));
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -983,8 +983,8 @@ static bool test_compress_pending_guard()
     HIPCHECK(hipCompressSynchronize(plan, &legacy_len, &legacy_cr));
     if (legacy_len != len || legacy_cr != cr) {
         printf("  FAIL: combined Synchronize returned different data\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -994,8 +994,8 @@ static bool test_compress_pending_guard()
     HIPCHECK(hipCompressGetData(plan, &len_again, &cr_again));
     if (len_again != legacy_len || cr_again != legacy_cr) {
         printf("  FAIL: getter differs after combined Synchronize\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
@@ -1003,15 +1003,15 @@ static bool test_compress_pending_guard()
     err = hipCompressSynchronize(plan, nullptr, nullptr);
     if (err != hipErrorNotReady) {
         printf("  FAIL: combined Synchronize on idle plan did not return hipErrorNotReady\n");
-        hipFree(d_in); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
         return false;
     }
 
-    hipFree(d_in); hipFree(d_comp);
+    HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_comp));
     printf("  pending and result state transitions: PASS\n");
 
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return true;
 }
 
@@ -1073,9 +1073,9 @@ static bool test_out_of_order_decompress()
 
     printf("  out-of-order (3 permutations, 9 calls): %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_inA); hipFree(d_inB); hipFree(d_inC); hipFree(d_output);
-    hipFree(d_compA); hipFree(d_compB); hipFree(d_compC);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_inA)); HIPCHECK(hipFree(d_inB)); HIPCHECK(hipFree(d_inC)); HIPCHECK(hipFree(d_output));
+    HIPCHECK(hipFree(d_compA)); HIPCHECK(hipFree(d_compB)); HIPCHECK(hipFree(d_compC));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1119,8 +1119,8 @@ static bool test_zero_input()
     bool pass = (max_val == 0.0f) && (len > 0);
     printf("  CR=%.2f, len=%ld, max_output=%.2e: %s\n", cr, len, max_val, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1174,8 +1174,8 @@ static bool test_near_zero_input()
            tiny_val, cr, len, has_nan ? "yes" : "no", has_inf ? "yes" : "no",
            pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1217,8 +1217,8 @@ static bool test_noncubic_roundtrip(int nx, int ny, int nz, float scale, const c
     printf("  %-20s %4dx%4dx%4d: CR=%.2f, max_err=%.4e, rms=%.4e, err/inv_scale=%.2f: %s\n",
            tag, nx, ny, nz, cr, max_err, rms, err_ratio, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1307,8 +1307,8 @@ static bool test_error_bound()
             prev_err = max_err; prev_scale = c.scale; prev_nx = 128;
         }
 
-        hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+        HIPCHECK(hipCompressDestroyPlan(plan));
     }
     printf("  error bound: %s\n", pass ? "PASS" : "FAIL");
     return pass;
@@ -1371,8 +1371,8 @@ static bool test_copy_zero_padding()
     }
     printf("  mismatches: %d / %ld: %s\n", mismatches, dst_total, pass ? "PASS" : "FAIL");
 
-    hipFree(d_src); hipFree(d_dst);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_dst));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1419,8 +1419,8 @@ static bool test_copy_nonzero_origin()
     }
     printf("  non-zero origin copy: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_vol); hipFree(d_dst);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_vol)); HIPCHECK(hipFree(d_dst));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1469,8 +1469,8 @@ static bool test_rms_accuracy()
                c.tag, cpu_rms, gpu_rms, rel_err, ok ? "ok" : "FAIL");
         if (!ok) pass = false;
 
-        hipFree(d_src);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_src));
+        HIPCHECK(hipCompressDestroyPlan(plan));
     }
     printf("  RMS accuracy: %s\n", pass ? "PASS" : "FAIL");
     return pass;
@@ -1503,8 +1503,8 @@ static bool test_rms_zero_constant()
         printf("  zero input: rms=%.2e: %s\n", h_rms, ok ? "ok" : "FAIL");
         if (!ok) pass = false;
 
-        hipFree(d_src);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_src));
+        HIPCHECK(hipCompressDestroyPlan(plan));
     }
 
     {
@@ -1534,8 +1534,8 @@ static bool test_rms_zero_constant()
         printf("  constant(%.1f): rms=%.6e rel_err=%.2e: %s\n", val, h_rms, rel_err, ok ? "ok" : "FAIL");
         if (!ok) pass = false;
 
-        hipFree(d_src);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_src));
+        HIPCHECK(hipCompressDestroyPlan(plan));
     }
     printf("  RMS zero/constant: %s\n", pass ? "PASS" : "FAIL");
     return pass;
@@ -1642,8 +1642,8 @@ static bool test_copy_modes()
     if (!err_rms_ok) pass = false;
 
     printf("  mode dispatch: %s\n", pass ? "PASS" : "FAIL");
-    hipFree(d_src); hipFree(d_dst);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_dst));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1713,8 +1713,8 @@ static bool test_copy_roundtrip()
                c.tag, c.wx, c.wy, c.wz, wnx, wny, wnz, cr, max_err, bound, ok ? "ok" : "FAIL");
         if (!ok) pass = false;
 
-        hipFree(d_src); hipFree(d_wav); hipFree(d_wav_out); hipFree(d_dst); hipFree(d_comp);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_wav_out)); HIPCHECK(hipFree(d_dst)); HIPCHECK(hipFree(d_comp));
+        HIPCHECK(hipCompressDestroyPlan(plan));
     }
     printf("  copy round-trip: %s\n", pass ? "PASS" : "FAIL");
     return pass;
@@ -1765,8 +1765,8 @@ static bool test_copy_from_wavelet()
     }
     printf("  mismatches: %d / %ld: %s\n", mismatches, dst_total, pass ? "PASS" : "FAIL");
 
-    hipFree(d_wav); hipFree(d_dst);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_dst));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return pass;
 }
 
@@ -1791,8 +1791,27 @@ static bool test_wavelet_dims_helper()
     return pass;
 }
 
+// Block-periodic test field: s(ix) * s(iy) * s(iz), s(i) = sin(2*pi*((i % P) + 0.5) / P).
+// P divides 32, so every 32^3 wavelet block holds the same samples at every grid
+// size. The CR and the RMS then do not depend on the grid size, and a throughput
+// sweep over grids does not mix size effects with density effects. P sets the
+// density: a smaller period is a higher frequency and more nonzero coefficients.
+__global__ void initPeriodicKernel(float* data, int nx, int ny, int nz, int P)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)nx * ny * nz;
+    if (idx >= total) return;
+    int iz = (int)(idx / ((long)nx * ny));
+    int iy = (int)((idx - (long)iz * nx * ny) / nx);
+    int ix = (int)(idx - (long)iz * nx * ny - (long)iy * nx);
+    const float w = 6.28318530717958647692f / (float)P;
+    data[idx] = sinf(w * (float)((ix % P) + 0.5f)) *
+                sinf(w * (float)((iy % P) + 0.5f)) *
+                sinf(w * (float)((iz % P) + 0.5f));
+}
+
 static void bench_grid_size(int nx, int ny, int nz, float scale,
-                            hipCompressKernel kernel, const char* label)
+                            hipCompressKernel kernel, const char* label, int period)
 {
     long total = (long)nx * ny * nz;
     float data_MB = (float)total * sizeof(float) / (1024.0f * 1024.0f);
@@ -1810,32 +1829,32 @@ static void bench_grid_size(int nx, int ny, int nz, float scale,
     HIPCHECK(hipMalloc(&d_compressed, comp_size));
 
     int threads = 256, blocks = (int)((total + threads - 1) / threads);
-    initSinKernel<<<blocks, threads>>>(d_input, nx, ny, nz, 40.0f, 40.0f, 40.0f);
+    initPeriodicKernel<<<blocks, threads>>>(d_input, nx, ny, nz, period);
     HIPCHECK(hipDeviceSynchronize());
 
     const int warmup = 10, iters = 50;
     long len = 0;
 
     for (int i = 0; i < warmup; ++i) {
-        compressWithAutoRMS(scale, d_input, d_compressed, &len, nullptr, plan);
-        hipDecompress(d_compressed, d_output, plan, 0);
+        HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &len, nullptr, plan));
+        HIPCHECK(hipDecompress(d_compressed, d_output, plan, 0));
     }
 
     hipEvent_t t0, t1, t2;
-    hipEventCreate(&t0); hipEventCreate(&t1); hipEventCreate(&t2);
+    HIPCHECK(hipEventCreate(&t0)); HIPCHECK(hipEventCreate(&t1)); HIPCHECK(hipEventCreate(&t2));
 
-    hipEventRecord(t0);
+    HIPCHECK(hipEventRecord(t0));
     for (int i = 0; i < iters; ++i)
-        compressWithAutoRMS(scale, d_input, d_compressed, &len, nullptr, plan);
-    hipEventRecord(t1);
+        HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &len, nullptr, plan));
+    HIPCHECK(hipEventRecord(t1));
     for (int i = 0; i < iters; ++i)
-        hipDecompress(d_compressed, d_output, plan, 0);
-    hipEventRecord(t2);
-    hipEventSynchronize(t2);
+        HIPCHECK(hipDecompress(d_compressed, d_output, plan, 0));
+    HIPCHECK(hipEventRecord(t2));
+    HIPCHECK(hipEventSynchronize(t2));
 
     float fwd_ms = 0, inv_ms = 0;
-    hipEventElapsedTime(&fwd_ms, t0, t1);
-    hipEventElapsedTime(&inv_ms, t1, t2);
+    HIPCHECK(hipEventElapsedTime(&fwd_ms, t0, t1));
+    HIPCHECK(hipEventElapsedTime(&inv_ms, t1, t2));
     fwd_ms /= iters;
     inv_ms /= iters;
 
@@ -1843,20 +1862,22 @@ static void bench_grid_size(int nx, int ny, int nz, float scale,
     float fwd_bw = data_MB / fwd_ms * 1000.0f / 1024.0f;
     float inv_bw = data_MB / inv_ms * 1000.0f / 1024.0f;
 
-    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %8.1f  %8.3f  %8.1f  %5.2fx\n",
+    printf("  %4dx%4dx%4d  %7s  %7.1f  %6.1f:1  %8.3f  %9.1f  %8.3f  %9.1f  %5.2fx\n",
            nx, ny, nz, label, data_MB, cr, fwd_ms, fwd_bw, inv_ms, inv_bw, inv_ms / fwd_ms);
 
-    hipEventDestroy(t0); hipEventDestroy(t1); hipEventDestroy(t2);
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipEventDestroy(t0)); HIPCHECK(hipEventDestroy(t1)); HIPCHECK(hipEventDestroy(t2));
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
 }
 
 static void bench_throughput()
 {
     const float scale = 5e-2f;
-    printf("Benchmark: API throughput, scale=%.0e, sin(40x)sin(40y)sin(40z)\n", scale);
-    printf("  %16s  %7s  %7s  %6s  %8s  %8s  %8s  %8s  %5s\n",
-           "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GB/s", "inv(ms)", "inv GB/s", "ratio");
+
+    // Sine period in samples; each divides the 32-sample wavelet block. Smaller
+    // is denser. P=2 is a +-1 checkerboard (one Nyquist pattern), so its CR is
+    // higher than P=4 and the density is not monotone in P at the low end.
+    const int periods[] = {32, 16, 8, 4, 2};
 
     int sizes[][3] = {
         {352, 416, 320},
@@ -1869,9 +1890,17 @@ static void bench_throughput()
         {512, 512, 512},
     };
 
-    // Retained 3D codec on the API path.
-    for (auto& s : sizes) {
-        bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,   "octree");
+    // Retained 3D codec on the API path. GiB/s = 2^30 bytes per second.
+    for (int P : periods) {
+        printf("Benchmark: API throughput, scale=%.0e, block-periodic sine, P=%d\n",
+               scale, P);
+        printf("  %16s  %7s  %7s  %6s  %8s  %9s  %8s  %9s  %5s\n",
+               "grid", "codec", "MB", "CR", "fwd(ms)", "fwd GiB/s", "inv(ms)", "inv GiB/s", "ratio");
+        for (auto& s : sizes) {
+            bench_grid_size(s[0], s[1], s[2], scale, HIP_COMPRESS_KERNEL_OCTREE,
+                            "octree", P);
+        }
+        printf("\n");
     }
 }
 
@@ -1966,37 +1995,37 @@ static void bench_radial_sinc_sweep()
         float gpu_cr = 0;
 
         for (int i = 0; i < warmup; ++i) {
-            compressWithAutoRMS(scale, d_input, d_compressed, &gpu_len, nullptr, plan);
-            hipDecompress(d_compressed, d_output, plan, 0);
+            HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &gpu_len, nullptr, plan));
+            HIPCHECK(hipDecompress(d_compressed, d_output, plan, 0));
         }
 
         hipEvent_t te0, te1, te2;
-        hipEventCreate(&te0); hipEventCreate(&te1); hipEventCreate(&te2);
+        HIPCHECK(hipEventCreate(&te0)); HIPCHECK(hipEventCreate(&te1)); HIPCHECK(hipEventCreate(&te2));
 
-        hipEventRecord(te0);
+        HIPCHECK(hipEventRecord(te0));
         for (int i = 0; i < iters; ++i)
-            compressWithAutoRMS(scale, d_input, d_compressed, &gpu_len, &gpu_cr, plan);
-        hipEventRecord(te1);
+            HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &gpu_len, &gpu_cr, plan));
+        HIPCHECK(hipEventRecord(te1));
         for (int i = 0; i < iters; ++i)
-            hipDecompress(d_compressed, d_output, plan, 0);
-        hipEventRecord(te2);
-        hipEventSynchronize(te2);
+            HIPCHECK(hipDecompress(d_compressed, d_output, plan, 0));
+        HIPCHECK(hipEventRecord(te2));
+        HIPCHECK(hipEventSynchronize(te2));
 
         float gpu_fwd_ms = 0, gpu_inv_ms = 0;
-        hipEventElapsedTime(&gpu_fwd_ms, te0, te1); gpu_fwd_ms /= iters;
-        hipEventElapsedTime(&gpu_inv_ms, te1, te2); gpu_inv_ms /= iters;
-        hipEventDestroy(te0); hipEventDestroy(te1); hipEventDestroy(te2);
+        HIPCHECK(hipEventElapsedTime(&gpu_fwd_ms, te0, te1)); gpu_fwd_ms /= iters;
+        HIPCHECK(hipEventElapsedTime(&gpu_inv_ms, te1, te2)); gpu_inv_ms /= iters;
+        HIPCHECK(hipEventDestroy(te0)); HIPCHECK(hipEventDestroy(te1)); HIPCHECK(hipEventDestroy(te2));
 
         // GPU error: decompress one more time, copy back
-        compressWithAutoRMS(scale, d_input, d_compressed, &gpu_len, &gpu_cr, plan);
+        HIPCHECK(compressWithAutoRMS(scale, d_input, d_compressed, &gpu_len, &gpu_cr, plan));
         
-        hipDecompress(d_compressed, d_output, plan, 0);
+        HIPCHECK(hipDecompress(d_compressed, d_output, plan, 0));
         std::vector<float> h_gpu_out(total);
         HIPCHECK(hipMemcpy(h_gpu_out.data(), d_output, total * sizeof(float), hipMemcpyDeviceToHost));
         ErrorNorms gpu_err = computeErrors(h_data.data(), h_gpu_out.data(), total);
 
-        hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+        HIPCHECK(hipCompressDestroyPlan(plan));
 
         // --- CPU compress/decompress + timing (sweep thread counts) ---
         CvxCompress compressor;
@@ -2147,11 +2176,11 @@ static bool test_pipeline_overlap()
     bool pass = (max_err < rms) && (len > 0);
     printf("  len=%ld, err=%.4e: %s\n", len, max_err, pass ? "PASS" : "FAIL");
 
-    hipEventDestroy(user_done);
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(stream);
+    HIPCHECK(hipEventDestroy(user_done));
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(stream));
     return pass;
 }
 
@@ -2203,11 +2232,11 @@ static bool test_different_user_stream_per_call()
     printf("  CR=%.2f, err=%.4e (compress on sA, decompress on sB): %s\n",
            cr, max_err, pass ? "PASS" : "FAIL");
 
-    hipEventDestroy(bridge);
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(sA); hipStreamDestroy(sB);
+    HIPCHECK(hipEventDestroy(bridge));
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(sA)); HIPCHECK(hipStreamDestroy(sB));
     return pass;
 }
 
@@ -2248,9 +2277,9 @@ static bool test_user_stream_equals_aux_stream()
     bool pass = (max_err < rms) && (cr > 1.0f);
     printf("  CR=%.2f, err=%.4e: %s\n", cr, max_err, pass ? "PASS" : "FAIL");
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_compressed);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(shared);
+    HIPCHECK(hipFree(d_input)); HIPCHECK(hipFree(d_output)); HIPCHECK(hipFree(d_compressed));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(shared));
     return pass;
 }
 
@@ -2312,10 +2341,10 @@ static bool test_full_pipeline_nondefault_stream()
     printf("  %dx%dx%d -> %dx%dx%d: CR=%.2f err=%.4e bound=%.4e: %s\n",
            wx, wy, wz, wnx, wny, wnz, cr, max_err, bound, pass ? "PASS" : "FAIL");
 
-    hipFree(d_src); hipFree(d_wav); hipFree(d_wav_out); hipFree(d_dst); hipFree(d_comp);
-    hipCompressDestroyPlan(plan);
-    hipStreamDestroy(aux);
-    hipStreamDestroy(stream);
+    HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_wav_out)); HIPCHECK(hipFree(d_dst)); HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(stream));
     return pass;
 }
 
@@ -2363,50 +2392,50 @@ static void bench_copy_kernels()
         HIPCHECK(hipCompressCreatePlan(&plan, wnx, wny, wnz, 0));
 
         for (int i = 0; i < warmup; ++i) {
-            hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
+            HIPCHECK(hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
                 0, 0, 0, c.wx, c.wy, c.wz,
-                d_wav, nullptr, plan, 0);
-            hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
+                d_wav, nullptr, plan, 0));
+            HIPCHECK(hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
                 0, 0, 0, c.wx, c.wy, c.wz,
-                d_wav, plan->d_rms, plan, 0);
-            hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
+                d_wav, plan->d_rms, plan, 0));
+            HIPCHECK(hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
                 0, 0, 0, c.wx, c.wy, c.wz,
-                nullptr, plan->d_rms, plan, 0);
-            hipCopyFromWaveletLayout(d_wav,
-                d_dst, c.wx, c.wx * c.wy, 0, 0, 0, c.wx, c.wy, c.wz, plan, 0);
+                nullptr, plan->d_rms, plan, 0));
+            HIPCHECK(hipCopyFromWaveletLayout(d_wav,
+                d_dst, c.wx, c.wx * c.wy, 0, 0, 0, c.wx, c.wy, c.wz, plan, 0));
         }
 
         hipEvent_t t0, t1, t2, t3, t4;
-        hipEventCreate(&t0); hipEventCreate(&t1); hipEventCreate(&t2);
-        hipEventCreate(&t3); hipEventCreate(&t4);
+        HIPCHECK(hipEventCreate(&t0)); HIPCHECK(hipEventCreate(&t1)); HIPCHECK(hipEventCreate(&t2));
+        HIPCHECK(hipEventCreate(&t3)); HIPCHECK(hipEventCreate(&t4));
 
-        hipEventRecord(t0);
+        HIPCHECK(hipEventRecord(t0));
         for (int i = 0; i < iters; ++i)
-            hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
+            HIPCHECK(hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
                 0, 0, 0, c.wx, c.wy, c.wz,
-                d_wav, nullptr, plan, 0);
-        hipEventRecord(t1);
+                d_wav, nullptr, plan, 0));
+        HIPCHECK(hipEventRecord(t1));
         for (int i = 0; i < iters; ++i)
-            hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
+            HIPCHECK(hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
                 0, 0, 0, c.wx, c.wy, c.wz,
-                d_wav, plan->d_rms, plan, 0);
-        hipEventRecord(t2);
+                d_wav, plan->d_rms, plan, 0));
+        HIPCHECK(hipEventRecord(t2));
         for (int i = 0; i < iters; ++i)
-            hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
+            HIPCHECK(hipCopyToWaveletLayout(d_src, c.wx, c.wx * c.wy,
                 0, 0, 0, c.wx, c.wy, c.wz,
-                nullptr, plan->d_rms, plan, 0);
-        hipEventRecord(t3);
+                nullptr, plan->d_rms, plan, 0));
+        HIPCHECK(hipEventRecord(t3));
         for (int i = 0; i < iters; ++i)
-            hipCopyFromWaveletLayout(d_wav,
-                d_dst, c.wx, c.wx * c.wy, 0, 0, 0, c.wx, c.wy, c.wz, plan, 0);
-        hipEventRecord(t4);
-        hipEventSynchronize(t4);
+            HIPCHECK(hipCopyFromWaveletLayout(d_wav,
+                d_dst, c.wx, c.wx * c.wy, 0, 0, 0, c.wx, c.wy, c.wz, plan, 0));
+        HIPCHECK(hipEventRecord(t4));
+        HIPCHECK(hipEventSynchronize(t4));
 
         float copy_ms = 0, copyrms_ms = 0, rms_ms = 0, from_ms = 0;
-        hipEventElapsedTime(&copy_ms, t0, t1); copy_ms /= iters;
-        hipEventElapsedTime(&copyrms_ms, t1, t2); copyrms_ms /= iters;
-        hipEventElapsedTime(&rms_ms, t2, t3); rms_ms /= iters;
-        hipEventElapsedTime(&from_ms, t3, t4); from_ms /= iters;
+        HIPCHECK(hipEventElapsedTime(&copy_ms, t0, t1)); copy_ms /= iters;
+        HIPCHECK(hipEventElapsedTime(&copyrms_ms, t1, t2)); copyrms_ms /= iters;
+        HIPCHECK(hipEventElapsedTime(&rms_ms, t2, t3)); rms_ms /= iters;
+        HIPCHECK(hipEventElapsedTime(&from_ms, t3, t4)); from_ms /= iters;
 
         float copy_bw = rw_MB / copy_ms * 1000.0f / 1024.0f;
         float copyrms_bw = rw_MB / copyrms_ms * 1000.0f / 1024.0f;
@@ -2418,10 +2447,10 @@ static void bench_copy_kernels()
                copy_ms, copy_bw, copyrms_ms, copyrms_bw,
                rms_ms, rms_bw, from_ms, from_bw);
 
-        hipEventDestroy(t0); hipEventDestroy(t1); hipEventDestroy(t2);
-        hipEventDestroy(t3); hipEventDestroy(t4);
-        hipFree(d_src); hipFree(d_wav); hipFree(d_dst);
-        hipCompressDestroyPlan(plan);
+        HIPCHECK(hipEventDestroy(t0)); HIPCHECK(hipEventDestroy(t1)); HIPCHECK(hipEventDestroy(t2));
+        HIPCHECK(hipEventDestroy(t3)); HIPCHECK(hipEventDestroy(t4));
+        HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_dst));
+        HIPCHECK(hipCompressDestroyPlan(plan));
     }
 }
 
@@ -2455,7 +2484,7 @@ static bool test_error_codes()
         if (!check_error("CreatePlan negative dim", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_DIMENSIONS))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2463,7 +2492,7 @@ static bool test_error_codes()
         if (!check_error("CreatePlan not mult 32", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_NOT_MULTIPLE_OF_32))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2474,7 +2503,7 @@ static bool test_error_codes()
         if (!check_error("CreatePlan plane too large", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_PLANE_TOO_LARGE))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2484,7 +2513,28 @@ static bool test_error_codes()
                           hipErrorInvalidValue,
                           HIP_COMPRESS_ERROR_VOLUME_TOO_LARGE))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
+    }
+    {
+        // Valid dimensions, but the plan's scratch buffer cannot fit on the
+        // device. A 32768 x 32768 plane has 2^20 blocks, and a 3D block needs
+        // at least 64 KiB of scratch. Ask for two more z-layers than free memory
+        // can hold at that rate.
+        size_t free_bytes = 0, total_bytes = 0;
+        HIPCHECK(hipMemGetInfo(&free_bytes, &total_bytes));
+        const size_t blocks_xy = (size_t)1 << 20;
+        const size_t bz = free_bytes / (blocks_xy * 65536) + 2;
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 32768, 32768, (int)(32 * bz), 0);
+        if (!check_error("CreatePlan out of memory", plan, err,
+                          hipErrorOutOfMemory,
+                          HIP_COMPRESS_ERROR_MEMORY_ALLOCATION))
+            pass = false;
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
+        // The failed hipMalloc left an error in HIP's sticky state. Clear it so
+        // it does not fail the next test's hipGetLastError().
+        (void)hipGetLastError();
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2493,7 +2543,7 @@ static bool test_error_codes()
         if (!check_error("CreatePlan unknown codec", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_CODEC))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2502,7 +2552,7 @@ static bool test_error_codes()
         if (!check_error("CreatePlan 3D codec for 2D plan", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_CODEC))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2511,7 +2561,7 @@ static bool test_error_codes()
         if (!check_error("CreatePlan 2D codec for 3D plan", plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_INVALID_CODEC))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipCompressPlan* plan = nullptr;
@@ -2522,7 +2572,7 @@ static bool test_error_codes()
                           hipErrorInvalidValue,
                           HIP_COMPRESS_ERROR_INVALID_AUX_STAGE))
             pass = false;
-        if (plan) hipCompressDestroyPlan(plan);
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
         hipError_t err = hipCompressCreatePlan(nullptr, 128, 128, 128, 0);
@@ -2543,7 +2593,7 @@ static bool test_error_codes()
             if (!check_error("CreatePlan success", plan, err,
                               hipSuccess, HIP_COMPRESS_SUCCESS))
                 pass = false;
-            hipCompressDestroyPlan(plan);
+            HIPCHECK(hipCompressDestroyPlan(plan));
         }
     }
 
@@ -2737,7 +2787,7 @@ static bool test_error_codes()
         if (!check_error("CopyTo extraction exceeds plan", small_plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH))
             pass = false;
-        hipCompressDestroyPlan(small_plan);
+        HIPCHECK(hipCompressDestroyPlan(small_plan));
     }
     {
         hipError_t err = hipCopyToWaveletLayout(
@@ -2784,7 +2834,7 @@ static bool test_error_codes()
         if (!check_error("CopyFrom extraction exceeds plan", small_plan, err,
                           hipErrorInvalidValue, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH))
             pass = false;
-        hipCompressDestroyPlan(small_plan);
+        HIPCHECK(hipCompressDestroyPlan(small_plan));
     }
     {
         hipError_t err = hipCopyFromWaveletLayout(
@@ -2869,8 +2919,8 @@ static bool test_error_codes()
 
     // --- Success clears error ---
     {
-        // Trigger an error first
-        hipCompress(5e-2f, nullptr, nullptr, d_comp, plan, 0);
+        // Trigger an error first (the call is expected to fail)
+        (void)hipCompress(5e-2f, nullptr, nullptr, d_comp, plan, 0);
         if (hipCompressGetLastError(plan) != HIP_COMPRESS_ERROR_NULL_INPUT) {
             printf("  FAIL [error set before clear test]\n");
             pass = false;
@@ -2883,25 +2933,25 @@ static bool test_error_codes()
             pass = false;
     }
 
-    hipFree(d_buf); hipFree(d_comp);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_buf)); HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipCompressDestroyPlan(plan));
 
     printf("  error codes: %s\n", pass ? "PASS" : "FAIL");
     return pass;
 }
 
 // ---------------------------------------------------------------------------
-// Test 37: Demonstrate soffset overflow with large stride + ez0.
+// Test 37: 32-bit byte-offset overflow with large stride + ez0.
 //
 // Allocates ~5.3 GB source buffer with large ldimxy and ez0 so that the
 // z-plane byte offset (ez0 + iz_src) * ldimxy * 4 exceeds UINT32_MAX.
 // Writes sentinel values at correct source locations.  If the kernel reads
-// from the right addresses the wavelet output contains sentinels; if soffset
-// wraps it reads zeros → detectable mismatch.
+// from the right addresses the wavelet output contains sentinels; if the byte
+// offset wraps at 32 bits it reads zeros → detectable mismatch.
 // ---------------------------------------------------------------------------
-bool test_soffset_overflow()
+bool test_offset_overflow()
 {
-    printf("Test 37: soffset overflow with large stride + ez0\n");
+    printf("Test 37: 32-bit offset overflow with large stride + ez0\n");
 
     const int ldimx  = 10000;
     const int ldimy  = 1000;
@@ -2910,12 +2960,12 @@ bool test_soffset_overflow()
     const int ex = 32, ey = 32, ez = 32;
     const int wnx = 32, wny = 32, wnz = 32;
 
-    // Verify this configuration actually overflows uint32 soffset
+    // Verify this configuration actually overflows a uint32 byte offset
     long max_z_byte = (long)(ez0 + ez - 1) * ldimxy * sizeof(float);
     printf("  max z-plane byte offset: %ld (%.2f GB, uint32 max = %u)\n",
            max_z_byte, max_z_byte / 1.0e9, (unsigned)0xFFFFFFFF);
     if (max_z_byte <= (long)0xFFFFFFFF) {
-        printf("  SKIP: config does not overflow uint32 soffset\n");
+        printf("  SKIP: config does not overflow a uint32 byte offset\n");
         return true;
     }
 
@@ -2979,15 +3029,15 @@ bool test_soffset_overflow()
     }
 
     if (mismatches > 0)
-        printf("  %d/%d z-planes read wrong data (soffset overflow)\n", mismatches, ez);
+        printf("  %d/%d z-planes read wrong data (offset overflow)\n", mismatches, ez);
     else
         printf("  all %d sentinels correct\n", ez);
 
-    hipFree(d_src);
-    hipFree(d_wav);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_src));
+    HIPCHECK(hipFree(d_wav));
+    HIPCHECK(hipCompressDestroyPlan(plan));
 
-    printf("  soffset overflow: %s\n", pass ? "PASS" : "FAIL (overflow confirmed)");
+    printf("  offset overflow: %s\n", pass ? "PASS" : "FAIL (overflow confirmed)");
     return pass;
 }
 
@@ -3070,8 +3120,8 @@ static bool test_pointer_shift_alignment(int forced_shift)
         if (!ok) { printf("  (context may be poisoned; stopping sweep)\n"); break; }
     }
 
-    hipFree(d_input); hipFree(d_output); hipFree(d_base);
-    hipCompressDestroyPlan(plan);
+    (void)hipFree(d_input); (void)hipFree(d_output); (void)hipFree(d_base);
+    (void)hipCompressDestroyPlan(plan);
     printf("  pointer-shift alignment: %s\n", all_pass ? "PASS" : "FAIL (bug exposed)");
     return all_pass;
 }
@@ -3144,8 +3194,112 @@ static bool test_two_stream_packing()
            relA, relB, relB_vsA);
     printf("  two-stream packing: %s\n", pass ? "PASS" : "FAIL");
 
-    hipFree(d_inA); hipFree(d_inB); hipFree(d_out); hipFree(d_pack);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_inA)); HIPCHECK(hipFree(d_inB)); HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_pack));
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    return pass;
+}
+
+static bool test_cross_stream_copy_rms_ordering()
+{
+    printf("Regression: Same-plan copy/RMS ordering across streams\n");
+    const int N = 128;
+    const int total = N * N * N;
+
+    hipStream_t sA, sB, aux;
+    HIPCHECK(hipStreamCreate(&sA));
+    HIPCHECK(hipStreamCreate(&sB));
+    HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, aux));
+
+    float *d_srcA, *d_srcB, *d_wav, *d_out;
+    double *d_rmsA, *d_rmsB;
+    unsigned char* d_comp;
+    HIPCHECK(hipMalloc(&d_srcA, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_srcB, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_wav, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_out, (size_t)total * sizeof(float)));
+    HIPCHECK(hipMalloc(&d_rmsA, sizeof(double)));
+    HIPCHECK(hipMalloc(&d_rmsB, sizeof(double)));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp, maxout));
+
+    int blocks = (total + 255) / 256;
+    fillConstantKernel<<<blocks, 256, 0, sA>>>(d_srcA, total, 2.0f);
+    fillConstantKernel<<<blocks, 256, 0, sB>>>(d_srcB, total, 3.0f);
+    HIPCHECK(hipComputeRMS(
+        d_srcA, N, N * N, 0, 0, 0, N, N, N, d_rmsA, plan, sA));
+    HIPCHECK(hipComputeRMS(
+        d_srcB, N, N * N, 0, 0, 0, N, N, N, d_rmsB, plan, sB));
+    HIPCHECK(hipStreamSynchronize(sA));
+    HIPCHECK(hipStreamSynchronize(sB));
+
+    double rmsA = 0.0, rmsB = 0.0;
+    HIPCHECK(hipMemcpy(&rmsA, d_rmsA, sizeof(double), hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(&rmsB, d_rmsB, sizeof(double), hipMemcpyDeviceToHost));
+    bool rms_ok = fabs(rmsA - 2.0) < 1e-12 && fabs(rmsB - 3.0) < 1e-12;
+
+    // Reference: the same pipeline on one stream, with a sync between steps.
+    const size_t wav_bytes = (size_t)total * sizeof(float);
+    float* d_ref = nullptr;
+    HIPCHECK(hipMalloc(&d_ref, wav_bytes));
+    initSinKernel<<<blocks, 256, 0, sA>>>(
+        d_srcA, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipCopyToWaveletLayout(
+        d_srcA, N, N * N, 0, 0, 0, N, N, N,
+        d_wav, plan->d_rms, plan, sA));
+    HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_wav, d_comp, plan, sA));
+    long ref_len = 0;
+    HIPCHECK(hipCompressSynchronize(plan, &ref_len, nullptr));
+    HIPCHECK(hipDecompress(d_comp, d_wav, plan, sA));
+    HIPCHECK(hipCopyFromWaveletLayout(
+        d_wav, d_ref, N, N * N, 0, 0, 0, N, N, N, plan, sA));
+    HIPCHECK(hipStreamSynchronize(sA));
+
+    // Cross-stream: copy on sA, consume on sB, then copy the decoded result back
+    // on sA. No caller event or stream synchronization bridges these calls.
+    // Hold each producer back with a spin kernel and zero the buffer it fills.
+    // The consumer on the other stream then reads zeros, and the result differs
+    // from the reference, unless the plan orders the two streams.
+    HIPCHECK(hipMemset(d_wav, 0, wav_bytes));
+    spinKernel<<<1, 1, 0, sA>>>(1000000);
+    HIPCHECK(hipCopyToWaveletLayout(
+        d_srcA, N, N * N, 0, 0, 0, N, N, N,
+        d_wav, plan->d_rms, plan, sA));
+    HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_wav, d_comp, plan, sB));
+    long len = 0;
+    HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+    HIPCHECK(hipMemsetAsync(d_wav, 0, wav_bytes, sB));
+    spinKernel<<<1, 1, 0, sB>>>(1000000);
+    HIPCHECK(hipDecompress(d_comp, d_wav, plan, sB));
+    HIPCHECK(hipCopyFromWaveletLayout(
+        d_wav, d_out, N, N * N, 0, 0, 0, N, N, N, plan, sA));
+    // Destroy must wait for the copy-from still queued on sA (the plan's last
+    // workspace stream).
+    HIPCHECK(hipCompressDestroyPlan(plan));
+    plan = nullptr;
+
+    std::vector<float> src(total), out(total), ref(total);
+    HIPCHECK(hipMemcpy(src.data(), d_srcA, wav_bytes, hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(out.data(), d_out, wav_bytes, hipMemcpyDeviceToHost));
+    HIPCHECK(hipMemcpy(ref.data(), d_ref, wav_bytes, hipMemcpyDeviceToHost));
+    float rms = hostRMS(src.data(), total);
+    float ref_err = maxAbsError(src.data(), ref.data(), total);
+    bool identical = memcmp(out.data(), ref.data(), wav_bytes) == 0;
+    bool pass = rms_ok && ref_err < rms && len == ref_len && identical;
+    printf("  rms=(%.1f,%.1f), len=%ld (ref %ld), ref err=%.4e, identical to ref=%s: %s\n",
+           rmsA, rmsB, len, ref_len, ref_err, identical ? "yes" : "no",
+           pass ? "PASS" : "FAIL");
+
+    HIPCHECK(hipFree(d_ref));
+    HIPCHECK(hipFree(d_srcA)); HIPCHECK(hipFree(d_srcB));
+    HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_out));
+    HIPCHECK(hipFree(d_rmsA)); HIPCHECK(hipFree(d_rmsB));
+    HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipStreamDestroy(aux));
+    HIPCHECK(hipStreamDestroy(sA)); HIPCHECK(hipStreamDestroy(sB));
     return pass;
 }
 
@@ -3162,7 +3316,7 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 38;
+    int passed = 0, total = 39;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
     if (test_octree_round_trip())           ++passed;
@@ -3198,9 +3352,10 @@ int main(int argc, char** argv)
     if (test_user_stream_equals_aux_stream())     ++passed;
     if (test_full_pipeline_nondefault_stream())   ++passed;
     if (test_error_codes())                       ++passed;
-    if (test_soffset_overflow())                  ++passed;
+    if (test_offset_overflow())                   ++passed;
     if (test_pointer_shift_alignment(-1))         ++passed;
     if (test_two_stream_packing())                ++passed;
+    if (test_cross_stream_copy_rms_ordering())    ++passed;
 
     printf("\n%d/%d TESTS PASSED\n\n", passed, total);
 
