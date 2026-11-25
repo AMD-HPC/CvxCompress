@@ -13,7 +13,6 @@ wavefield snapshots are stored and retrieved on the GPU.
 The pipeline applies the DS 7/9 wavelet transform, quantizes the coefficients,
 and codes their significance and values. The coder is selectable per plan; the default
 resolves to octree for 3D and quadtree for 2D.
-Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 
 The API can move the scan, compaction, and readback tail to a separate stream.
 The best stream placement depends on the caller's GPU workload. Profile the
