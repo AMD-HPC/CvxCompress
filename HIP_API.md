@@ -29,7 +29,8 @@ integrated pipeline.
 ```bash
 module load rocm/7.2.1
 
-# Build the CPU reference library (needed by tests)
+# Build the CPU reference library (linked by test_compress_api_hip and
+# test_async_overlap_3d)
 make libcvxcompress.so
 
 # Build the retained correctness suites and performance benchmark
@@ -100,6 +101,7 @@ All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
 
 | Function | Description |
 |----------|-------------|
+| `hipCompressBufferSize` | Size in bytes of the uncompressed wavelet-layout buffer (for allocation) |
 | `hipCompressMaxOutputSize` | Upper bound on compressed output size (for allocation) |
 | `hipCompressWaveletDims` | Round dimensions up to multiples of 32 |
 | `hipCompressGetLastError` | Library-specific error code from last call |
@@ -215,6 +217,10 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
   error, lower compression ratio.
 - Without RMS (`d_rms == NULL`): `scale` is used directly as the quantization
   multiplier.
+- If `rms × scale` is zero or negative, or its reciprocal is not finite, the
+  multiplier is `1.0`. For example, an all-zero input has `rms = 0`.
+- `scale` must be positive and finite. Otherwise `hipCompress` fails with
+  `HIP_COMPRESS_ERROR_INVALID_SCALE`.
 
 ### Kernel Variants
 
@@ -224,7 +230,7 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
 | Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding |
 | Quadtree  | `HIP_COMPRESS_KERNEL_QUADTREE` | 2D    | Quadtree significance coder with per-block PFOR value coding -- the 2D counterpart of octree |
 
-The codec is selected **at runtime, per plan** via the last argument of
+The codec is selected **at runtime, per plan** via the `kernel` argument of
 `hipCompressCreatePlan` — it is an ordinary function parameter, so switching
 between codecs requires **no recompilation** of the library or the application:
 
@@ -282,7 +288,9 @@ split a no-op regardless of `aux_from`.
 
 ## Error Handling
 
-All API functions return `hipError_t`. For library-specific diagnostics:
+The GPU API functions return `hipError_t`. `hipCompressGetLastError` returns
+the library error code for a plan, and `hipCompressErrorString` turns that code
+into text. For library-specific diagnostics:
 
 ```cpp
 hipError_t err = hipCompress(...);
@@ -317,7 +325,8 @@ call the library.
 - **Wavefield values**: compression input must contain finite `float` values.
   NaN and infinity are outside the API contract.
 - **Concurrency**: a plan must not be used from multiple host threads. One
-  `hipCompress` must be synchronized before the next. Sequential calls may use
+  `hipCompress` must be synchronized before the next. `hipDecompress` also
+  fails with `hipErrorNotReady` while a compress is pending. Sequential calls may use
   different user streams; the plan orders copy, RMS, compress, and decompress
   work through an internal event. The plan remembers the last user stream by
   its handle. `hipCompressDestroyPlan` waits on that stream, so destroy the plan
@@ -332,18 +341,18 @@ call the library.
 hip/
   hipCompress.h                  Public API header
   hipCompress.cpp                API implementation
-  hipCompact.h                   Compact stream header and scan helpers
+  hipCompact.h                   Scan temp-size helper for compaction
   hipBlockCopy.h                 CopyTo / CopyFrom kernels
   hipPlaneIO.h                   64-bit plane load/store helpers
   hipCodecCommon.h               Shared quantization and width helpers
-  hipWaveletBitmap.h             Bitmap significance split and inverse transform
-  hipWaveletOctree.h             Octree significance coder + shared inverse stage
+  hipWaveletBitmap.h             Forward wavelet + quantize kernel, bitmap significance split
+  hipWaveletOctree.h             Octree significance coder, stream header size, 3D inverse stage
   hipWaveletQuadtree2D.h         Quadtree coder and 2D transform
   ds79.h                         DS 7/9 wavelet filter coefficients and transforms
   ds79_reg32.inc                 Unrolled forward wavelet (32-point)
   us79_reg32.inc                 Unrolled inverse wavelet (32-point)
 tests/
-  hip_test_common.h              Shared HIP test error handling
+  hip_test_common.h              Shared HIP error check and spin kernel for tests
   test_compress_api_hip.cpp      3D API regression suite
   test_compress_2d_hip.cpp       2D quadtree regression suite
   test_async_overlap_3d.cpp      Async stream correctness and overlap

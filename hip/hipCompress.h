@@ -204,6 +204,8 @@ hipError_t hipCopyFromWaveletLayout(
 //   d_rms != NULL: mulfac = 1 / (rms * scale).  scale is the error tolerance;
 //                  smaller scale → finer quantization → lower error, lower CR.
 //   d_rms == NULL: mulfac = scale.  Caller supplies mulfac directly.
+// If rms * scale is <= 0, or its reciprocal is not finite, mulfac is 1.0.
+// scale must be positive and finite (HIP_COMPRESS_ERROR_INVALID_SCALE).
 //
 // The fused wavelet + quantize + significance pass always runs on user_stream.
 // Which of the later stages run on aux_stream is set by plan->aux_from (see
