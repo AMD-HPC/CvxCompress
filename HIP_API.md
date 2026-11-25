@@ -3,8 +3,8 @@
 > **Experimental / Proof of Concept** — APIs are unstable and may change without
 > notice. Optimizations are ongoing. Not tested in an integrated production
 > setting. No backward compatibility guarantee for the compressed bitstream
-> format. Compression ratios differ from the CPU reference due to different
-> block tiling strategies.
+> format. Compression ratios differ from the CPU reference because the GPU uses
+> octree/quadtree significance coding and the CPU uses run-length encoding.
 
 GPU-accelerated lossy compression for 2D and 3D floating-point volumes on AMD
 Instinct GPUs (MI200, MI300, MI355). Targets seismic imaging workloads where
