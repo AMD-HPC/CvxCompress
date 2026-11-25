@@ -29,6 +29,18 @@
     } \
 } while(0)
 
+// Like HIPCHECK_PLAN for allocations. An out-of-memory failure is recorded as
+// HIP_COMPRESS_ERROR_MEMORY_ALLOCATION. The hipError_t is returned unchanged.
+#define HIPALLOC_PLAN(p, cmd) do { \
+    hipError_t _e = (cmd); \
+    if (_e != hipSuccess) { \
+        (p)->last_error = (_e == hipErrorOutOfMemory) \
+            ? HIP_COMPRESS_ERROR_MEMORY_ALLOCATION \
+            : HIP_COMPRESS_ERROR_HIP_RUNTIME; \
+        return _e; \
+    } \
+} while(0)
+
 // Plan workspace follows the caller's user stream. Work already queued on the
 // same stream needs no event. When the caller changes streams, bridge all prior
 // work to the new stream before it can reuse plan-owned buffers.
@@ -192,36 +204,36 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     int nb = p->num_blocks;
     size_t scratch_size = (size_t)nb * p->scratch_slot_stride;
 
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_scratch, scratch_size));
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_block_sizes, nb * sizeof(size_t)));
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_block_offsets, nb * sizeof(size_t)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_scratch, scratch_size));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_mulfac, sizeof(float)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_block_sizes, nb * sizeof(size_t)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_block_offsets, nb * sizeof(size_t)));
 
     if (kernel == HIP_COMPRESS_KERNEL_OCTREE) {
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_coded,
                                    (size_t)nb * WOCT_CODE_SLOT_BYTES));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
     } else if (kernel == HIP_COMPRESS_KERNEL_QUADTREE) {
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_coded,
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_coded,
                                    (size_t)nb * WQT2D_CODE_SLOT_BYTES));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
-        HIPCHECK_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_octree_sig_sizes, nb * sizeof(size_t)));
+        HIPALLOC_PLAN(p, hipMalloc(&p->d_inv_scale, sizeof(float)));
     }
 
     p->scan_temp_bytes = 0;
     hipError_t err = hipCompressCompactScanTempSize(nb, &p->scan_temp_bytes);
     if (err != hipSuccess) { p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME; return err; }
 
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_scan_temp, p->scan_temp_bytes));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_scan_temp, p->scan_temp_bytes));
 
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_rms, sizeof(double)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_rms, sizeof(double)));
 
     p->max_copy_blocks = (int)copy_blocks;
-    HIPCHECK_PLAN(p, hipMalloc(&p->d_partial_sums, p->max_copy_blocks * sizeof(double)));
+    HIPALLOC_PLAN(p, hipMalloc(&p->d_partial_sums, p->max_copy_blocks * sizeof(double)));
 
     HIPCHECK_PLAN(p, hipEventCreateWithFlags(&p->ready_event, hipEventDisableTiming));
-    HIPCHECK_PLAN(p, hipHostMalloc(&p->h_staging, 2 * sizeof(size_t)));
+    HIPALLOC_PLAN(p, hipHostMalloc(&p->h_staging, 2 * sizeof(size_t)));
 
     // JIT warmup: exclusive_scan on aux_stream
     err = rocprim::exclusive_scan(

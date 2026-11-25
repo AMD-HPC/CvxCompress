@@ -2516,6 +2516,27 @@ static bool test_error_codes()
         if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
     }
     {
+        // Valid dimensions, but the plan's scratch buffer cannot fit on the
+        // device. A 32768 x 32768 plane has 2^20 blocks, and a 3D block needs
+        // at least 64 KiB of scratch. Ask for two more z-layers than free memory
+        // can hold at that rate.
+        size_t free_bytes = 0, total_bytes = 0;
+        HIPCHECK(hipMemGetInfo(&free_bytes, &total_bytes));
+        const size_t blocks_xy = (size_t)1 << 20;
+        const size_t bz = free_bytes / (blocks_xy * 65536) + 2;
+        hipCompressPlan* plan = nullptr;
+        hipError_t err = hipCompressCreatePlan(
+            &plan, 32768, 32768, (int)(32 * bz), 0);
+        if (!check_error("CreatePlan out of memory", plan, err,
+                          hipErrorOutOfMemory,
+                          HIP_COMPRESS_ERROR_MEMORY_ALLOCATION))
+            pass = false;
+        if (plan) HIPCHECK(hipCompressDestroyPlan(plan));
+        // The failed hipMalloc left an error in HIP's sticky state. Clear it so
+        // it does not fail the next test's hipGetLastError().
+        (void)hipGetLastError();
+    }
+    {
         hipCompressPlan* plan = nullptr;
         hipError_t err = hipCompressCreatePlan(
             &plan, 128, 128, 128, 0, (hipCompressKernel)999);

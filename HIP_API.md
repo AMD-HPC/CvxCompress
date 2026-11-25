@@ -268,6 +268,11 @@ if (err != hipSuccess) {
 }
 ```
 
+`hipCompressCreatePlan` returns `hipErrorOutOfMemory` and sets
+`HIP_COMPRESS_ERROR_MEMORY_ALLOCATION` when the device cannot hold the plan's
+buffers. When creation fails, the plan pointer is still set so you can read the
+error code. Pass it to `hipCompressDestroyPlan` to release it.
+
 ## Limitations
 
 - **Plane size**: `nx × ny` must not exceed `INT_MAX` elements. Source strides
