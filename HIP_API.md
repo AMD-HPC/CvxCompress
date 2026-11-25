@@ -43,6 +43,30 @@ make HIP_ARCH=gfx942 bench_encode_full
 Set `HIP_ARCH` to match your target: `gfx90a` for MI200, `gfx942` for MI300X,
 or `gfx950` for MI355X.
 
+### Running the tests and benchmarks
+
+Run each binary from the repository root, for example `./build/test_compress_api_hip`.
+
+`test_compress_api_hip` runs the 39 API tests first. The exit code reports only
+those tests. With no arguments, it then runs three benchmarks:
+
+- `bench_copy_kernels`: copy and RMS kernel bandwidth.
+- `bench_throughput`: full compress and decompress throughput in GiB/s (2^30
+  bytes per second) on eight 3D grids from 32^3 to 512^3. The input is a sine field
+  whose period P divides the 32-sample wavelet block, so every block is
+  identical and the compression ratio does not change with grid size. The sweep
+  runs P = 32, 16, 8, 4, 2. A smaller P means a higher frequency and more
+  nonzero coefficients.
+- `bench_radial_sinc_sweep`: GPU and CPU compression ratio, throughput, and
+  error on a radial sinc field.
+
+A numeric argument, such as `./build/test_compress_api_hip 4`, skips everything
+else and runs only the pointer-shift alignment test with that byte shift.
+
+`bench_encode_full` takes `nx ny nz iterations codec` (defaults 512 512 512 200,
+codec AUTO). For example, `./build/bench_encode_full 256 256 256 50 0` times the
+octree codec at 256^3.
+
 ## API Overview
 
 All functions are declared in [`hip/hipCompress.h`](hip/hipCompress.h).
