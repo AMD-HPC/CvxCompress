@@ -74,7 +74,7 @@ int main(int argc, char** argv)
     printf("dims=%dx%dx%d  encode: %.4f ms  %.1f GB/s  len=%ld CR=%.2f\n",
            nx, ny, nz, ms, gbps, len, cr);
 
-    hipFree(d_in); hipFree(d_out); hipFree(d_rms);
-    hipCompressDestroyPlan(plan);
+    HIPCHECK(hipFree(d_in)); HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_rms));
+    HIPCHECK(hipCompressDestroyPlan(plan));
     return 0;
 }
