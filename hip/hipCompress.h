@@ -50,16 +50,11 @@ enum hipCompressKernel {
 // where "transform" is the fused wavelet + quantize + significance pass and
 // "encode" is the entropy coder (octree/quadtree significance + PFOR values).
 //
-// Transform never moves: it is bandwidth-bound and reads the caller's live
-// input buffer, so overlapping it only steals HBM from the caller.
+// Transform never moves: it reads the caller's live input buffer, so it always
+// runs on user_stream.
 //
 // This is a placement knob, not a correctness one: all three settings produce
-// byte-identical output. It is also not a free win. Measured against a wave
-// propagation kernel that already saturates the GPU, FROM_ENCODE is 2-4% SLOWER
-// than NONE, because the entropy coder is a throughput kernel with no idle
-// slack to reclaim and co-residency costs more than the hiding saves. See
-// rtm_storage/hipcvx_overlap_findings.md, sections 3f and 3h. Profile your own
-// caller before moving off the default.
+// byte-identical output. Profile your own caller before moving off the default.
 typedef enum {
     // aux_stream unused; the whole chain runs on user_stream.
     HIP_COMPRESS_AUX_NONE = 0,

@@ -2920,17 +2920,17 @@ static bool test_error_codes()
 }
 
 // ---------------------------------------------------------------------------
-// Test 37: Demonstrate soffset overflow with large stride + ez0.
+// Test 37: 32-bit byte-offset overflow with large stride + ez0.
 //
 // Allocates ~5.3 GB source buffer with large ldimxy and ez0 so that the
 // z-plane byte offset (ez0 + iz_src) * ldimxy * 4 exceeds UINT32_MAX.
 // Writes sentinel values at correct source locations.  If the kernel reads
-// from the right addresses the wavelet output contains sentinels; if soffset
-// wraps it reads zeros → detectable mismatch.
+// from the right addresses the wavelet output contains sentinels; if the byte
+// offset wraps at 32 bits it reads zeros → detectable mismatch.
 // ---------------------------------------------------------------------------
-bool test_soffset_overflow()
+bool test_offset_overflow()
 {
-    printf("Test 37: soffset overflow with large stride + ez0\n");
+    printf("Test 37: 32-bit offset overflow with large stride + ez0\n");
 
     const int ldimx  = 10000;
     const int ldimy  = 1000;
@@ -2939,12 +2939,12 @@ bool test_soffset_overflow()
     const int ex = 32, ey = 32, ez = 32;
     const int wnx = 32, wny = 32, wnz = 32;
 
-    // Verify this configuration actually overflows uint32 soffset
+    // Verify this configuration actually overflows a uint32 byte offset
     long max_z_byte = (long)(ez0 + ez - 1) * ldimxy * sizeof(float);
     printf("  max z-plane byte offset: %ld (%.2f GB, uint32 max = %u)\n",
            max_z_byte, max_z_byte / 1.0e9, (unsigned)0xFFFFFFFF);
     if (max_z_byte <= (long)0xFFFFFFFF) {
-        printf("  SKIP: config does not overflow uint32 soffset\n");
+        printf("  SKIP: config does not overflow a uint32 byte offset\n");
         return true;
     }
 
@@ -3008,7 +3008,7 @@ bool test_soffset_overflow()
     }
 
     if (mismatches > 0)
-        printf("  %d/%d z-planes read wrong data (soffset overflow)\n", mismatches, ez);
+        printf("  %d/%d z-planes read wrong data (offset overflow)\n", mismatches, ez);
     else
         printf("  all %d sentinels correct\n", ez);
 
@@ -3016,7 +3016,7 @@ bool test_soffset_overflow()
     hipFree(d_wav);
     hipCompressDestroyPlan(plan);
 
-    printf("  soffset overflow: %s\n", pass ? "PASS" : "FAIL (overflow confirmed)");
+    printf("  offset overflow: %s\n", pass ? "PASS" : "FAIL (overflow confirmed)");
     return pass;
 }
 
@@ -3331,7 +3331,7 @@ int main(int argc, char** argv)
     if (test_user_stream_equals_aux_stream())     ++passed;
     if (test_full_pipeline_nondefault_stream())   ++passed;
     if (test_error_codes())                       ++passed;
-    if (test_soffset_overflow())                  ++passed;
+    if (test_offset_overflow())                   ++passed;
     if (test_pointer_shift_alignment(-1))         ++passed;
     if (test_two_stream_packing())                ++passed;
     if (test_cross_stream_copy_rms_ordering())    ++passed;

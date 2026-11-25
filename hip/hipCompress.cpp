@@ -329,8 +329,7 @@ hipError_t hipCompress(
     hipStream_t enc = (plan->aux_from == HIP_COMPRESS_AUX_FROM_ENCODE) ? aux : s;
 
     // Bridge to aux_stream. The transform (wavelet + quantize + significance)
-    // never moves: it is bandwidth-bound and reads the caller's live input, so
-    // overlapping it would only steal HBM from the caller.
+    // never moves: it reads the caller's live input, so it stays on user_stream.
     //
     // Fires once, at the boundary plan->aux_from selects: before the entropy
     // coder at FROM_ENCODE, otherwise at the trailing call below (which also

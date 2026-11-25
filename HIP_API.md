@@ -8,7 +8,7 @@
 
 GPU-accelerated lossy compression for 2D and 3D floating-point volumes on AMD
 Instinct GPUs (MI200, MI300, MI355). Targets seismic imaging workloads where
-wavefield snapshots must be stored and retrieved at GPU memory bandwidth.
+wavefield snapshots are stored and retrieved on the GPU.
 
 The pipeline applies the DS 7/9 wavelet transform, quantizes the coefficients,
 and codes their significance and values. The coder is selectable per plan; the default
@@ -17,7 +17,7 @@ Error norms match the CPU reference (CvxCompress) to floating-point rounding.
 
 The API can move the scan, compaction, and readback tail to a separate stream.
 The best stream placement depends on the caller's GPU workload. Profile the
-integrated pipeline instead of assuming overlap will hide compression.
+integrated pipeline.
 
 ## Requirements
 
@@ -181,8 +181,7 @@ round up arbitrary window sizes. The wavelet buffer is a contiguous
 `hipCopyToWaveletLayout` copies `ex × ey × ez` samples starting at origin
 `(x0, y0, z0)` in the source grid. The wavelet buffer is `wnx × wny × wnz`
 (rounded up to multiples of 32). Positions beyond the extraction window are
-zero-filled — zero padding yields better compression ratios than mirror padding
-(20–55% smaller compressed output for non-multiple-of-32 volumes).
+zero-filled.
 
 ### Scale Parameter
 
@@ -199,7 +198,7 @@ The `scale` argument to `hipCompress` controls the quality/compression tradeoff:
 | Variant | Enum | Dims | Description |
 |---------|------|------|-------------|
 | Auto      | `HIP_COMPRESS_KERNEL_AUTO`     | 2D/3D | **Default.** Resolves to quadtree for 2D (`nz == 1`) and octree for 3D |
-| Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding. Best compression ratio and fastest decode; recommended for storage/archival |
+| Octree    | `HIP_COMPRESS_KERNEL_OCTREE`   | 3D    | Octree significance coder with per-block PFOR value coding |
 | Quadtree  | `HIP_COMPRESS_KERNEL_QUADTREE` | 2D    | Quadtree significance coder with per-block PFOR value coding -- the 2D counterpart of octree |
 
 The codec is selected **at runtime, per plan** via the last argument of
@@ -210,7 +209,7 @@ between codecs requires **no recompilation** of the library or the application:
 // default (kernel arg omitted) → auto: octree for 3D, quadtree for 2D
 hipCompressCreatePlan(&plan_def, nx, ny, nz, aux);
 
-// storage-oriented volume → octree (best ratio) — explicit form of the 3D default
+// octree — explicit form of the 3D default
 hipCompressCreatePlan(&plan_oct, nx, ny, nz, aux, HIP_COMPRESS_KERNEL_OCTREE);
 
 ```
@@ -237,8 +236,7 @@ where *transform* is the fused wavelet + quantize + significance pass and
 *encode* is the entropy coder.
 
 - **`user_stream`**: passed to each API call. The transform always runs here; it
-  is bandwidth-bound and reads the caller's live input buffer, so moving it off
-  `user_stream` only steals HBM from the caller. The stream is free as soon as
+  reads the caller's live input buffer. The stream is free as soon as
   the stages that stayed on it have been enqueued.
 - **`aux_stream`**: owned by the user, passed at plan creation. Shared across
   plans. Which stages it picks up is set by the `aux_from` argument to
@@ -255,11 +253,7 @@ selects. This lets simulation kernels continue on `user_stream` while the tail
 of compression finishes on `aux_stream`.
 
 `aux_from` is a **placement** knob, not a correctness one: all three settings
-produce byte-identical output. It is also not a free win. Measured against a
-wave propagation kernel that already saturates the GPU (512³ TTI, snapshot every
-7 steps, MI355X), `FROM_ENCODE` runs 3–4% *slower* than `NONE` — the entropy
-coder is a throughput kernel with no idle slack to reclaim, so co-residency costs
-more than the hiding saves. Profile your own caller before moving off the
+produce byte-identical output. Profile your own caller before moving off the
 default. Passing the same stream as both `aux_stream` and `user_stream` makes the
 split a no-op regardless of `aux_from`.
 
@@ -307,6 +301,7 @@ hip/
   hipCompress.cpp                API implementation
   hipCompact.h                   Compact stream header and scan helpers
   hipBlockCopy.h                 CopyTo / CopyFrom kernels
+  hipPlaneIO.h                   64-bit plane load/store helpers
   hipCodecCommon.h               Shared quantization and width helpers
   hipWaveletBitmap.h             Bitmap significance split and inverse transform
   hipWaveletOctree.h             Octree significance coder + shared inverse stage
