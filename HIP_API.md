@@ -297,6 +297,11 @@ if (err != hipSuccess) {
 buffers. When creation fails, the plan pointer is still set so you can read the
 error code. Pass it to `hipCompressDestroyPlan` to release it.
 
+The library calls `hipGetLastError()` after kernel launches. This clears any HIP
+error still pending on the calling host thread, and it can report that earlier
+error as the failure of the library call. Read your own pending error before you
+call the library.
+
 ## Limitations
 
 - **Plane size**: `nx × ny` must not exceed `INT_MAX` elements. Source strides
