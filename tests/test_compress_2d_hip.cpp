@@ -790,6 +790,94 @@ static bool test_cross_stream_copy_ordering_2d()
     return pass;
 }
 
+// Regression: a cached 2D plan must keep working after its user streams are
+// destroyed. See test_plan_outlives_user_streams in test_compress_api_hip.cpp.
+// The forward step runs on one stream and the backward step on the next. Rounds
+// alternate between a new stream with a different handle and one that reuses
+// the destroyed handle. The plan is destroyed after all of its user streams.
+static bool test_plan_outlives_user_streams_2d()
+{
+    printf("Test 13: 2D plan outlives its user streams\n");
+    const int NX = 128, NY = 128, total = NX * NY;
+    const size_t bytes = (size_t)total * sizeof(float);
+    const int rounds = 6;
+    hipStream_t aux;
+    HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+
+    hipCompressPlan* plan = nullptr;
+    HIPCHECK(hipCompressCreatePlan(
+        &plan, NX, NY, 1, aux, HIP_COMPRESS_KERNEL_QUADTREE));
+    float *d_src = nullptr, *d_wav = nullptr, *d_out = nullptr;
+    unsigned char* d_comp = nullptr;
+    HIPCHECK(hipMalloc(&d_src, bytes));
+    HIPCHECK(hipMalloc(&d_wav, bytes));
+    HIPCHECK(hipMalloc(&d_out, bytes));
+    size_t maxout = 0;
+    HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+    HIPCHECK(hipMalloc(&d_comp, maxout));
+    initSin2DKernel<<<(total + 255) / 256, 256>>>(d_src, NX, NY, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+    std::vector<float> src(total), ref(total), out(total);
+    HIPCHECK(hipMemcpy(src.data(), d_src, bytes, hipMemcpyDeviceToHost));
+
+    // Reference: the whole pipeline on one stream that stays alive.
+    hipStream_t s;
+    HIPCHECK(hipStreamCreate(&s));
+    HIPCHECK(hipCopyToWaveletLayout(
+        d_src, NX, NX * NY, 0, 0, 0, NX, NY, 1, d_wav, plan->d_rms, plan, s));
+    HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_wav, d_comp, plan, s));
+    long ref_len = 0;
+    HIPCHECK(hipCompressSynchronize(plan, &ref_len, nullptr));
+    HIPCHECK(hipDecompress(d_comp, d_wav, plan, s));
+    HIPCHECK(hipCopyFromWaveletLayout(
+        d_wav, d_out, NX, NX * NY, 0, 0, 0, NX, NY, 1, plan, s));
+    HIPCHECK(hipStreamSynchronize(s));
+    HIPCHECK(hipMemcpy(ref.data(), d_out, bytes, hipMemcpyDeviceToHost));
+
+    int good = 0, new_handles = 0;
+    for (int r = 0; r < rounds; ++r) {
+        const bool distinct = (r % 2 == 0);
+        HIPCHECK(hipMemsetAsync(d_wav, 0, bytes, s));
+        HIPCHECK(hipMemsetAsync(d_out, 0, bytes, s));
+        HIPCHECK(hipCopyToWaveletLayout(
+            d_src, NX, NX * NY, 0, 0, 0, NX, NY, 1, d_wav, plan->d_rms, plan, s));
+        HIPCHECK(hipCompress(5e-2f, plan->d_rms, d_wav, d_comp, plan, s));
+
+        hipStream_t old = s;
+        s = replaceStream(s, distinct);
+        if (s != old) ++new_handles;
+
+        long len = 0;
+        HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+        HIPCHECK(hipDecompress(d_comp, d_wav, plan, s));
+        HIPCHECK(hipCopyFromWaveletLayout(
+            d_wav, d_out, NX, NX * NY, 0, 0, 0, NX, NY, 1, plan, s));
+
+        old = s;
+        s = replaceStream(s, distinct);
+        if (s != old) ++new_handles;
+
+        HIPCHECK(hipMemcpy(out.data(), d_out, bytes, hipMemcpyDeviceToHost));
+        if (len == ref_len && memcmp(out.data(), ref.data(), bytes) == 0)
+            ++good;
+    }
+    HIPCHECK(hipStreamDestroy(s));
+    // Every user stream is gone. Destroy must not touch any of them.
+    HIPCHECK(hipCompressDestroyPlan(plan));
+
+    float rms = hostRMS(src.data(), total);
+    float ref_err = maxAbsError(src.data(), ref.data(), total);
+    bool pass = ref_len > 0 && ref_err < rms && good == rounds;
+    printf("  len=%ld, ref err=%.4e, rounds identical to ref=%d/%d "
+           "(%d new handles): %s\n",
+           ref_len, ref_err, good, rounds, new_handles, pass ? "PASS" : "FAIL");
+
+    HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav));
+    HIPCHECK(hipFree(d_out)); HIPCHECK(hipFree(d_comp));
+    HIPCHECK(hipStreamDestroy(aux));
+    return pass;
+}
+
 int main()
 {
     printf("=== 2D Compression Tests ===\n\n");
@@ -820,6 +908,8 @@ int main()
     total++; if (test_multithread_plans_2d()) passed++;
     printf("\n");
     total++; if (test_cross_stream_copy_ordering_2d()) passed++;
+    printf("\n");
+    total++; if (test_plan_outlives_user_streams_2d()) passed++;
     printf("\n");
 
     printf("=== Results: %d/%d passed ===\n", passed, total);

@@ -3303,6 +3303,113 @@ static bool test_cross_stream_copy_rms_ordering()
     return pass;
 }
 
+// Regression: a cached plan must keep working after its user streams are
+// destroyed. A caller may keep one plan for many operator calls and create and
+// destroy a compute stream around each call (DevitoPRO does this).
+//
+// Each round runs the forward step (copy-to, compress) on one stream and the
+// backward step (decompress, copy-from) on the next. The stream is replaced
+// between hipCompress and hipCompressSynchronize, and again after the backward
+// step. Rounds alternate between a new stream with a different handle and one
+// that reuses the destroyed handle. Every round must reproduce the single-stream
+// reference bit for bit, at every aux stage. The plan is destroyed last, after
+// all of its user streams are gone.
+static bool test_plan_outlives_user_streams()
+{
+    printf("Regression: Plan outlives its user streams\n");
+    const int N = 64;
+    const int total = N * N * N;
+    const size_t bytes = (size_t)total * sizeof(float);
+    const float scale = 5e-2f;
+    const int rounds = 6;
+    const hipCompressAuxStage stages[] = {
+        HIP_COMPRESS_AUX_FROM_COMPACT, HIP_COMPRESS_AUX_FROM_ENCODE,
+        HIP_COMPRESS_AUX_NONE};
+    const char* stage_names[] = {"FROM_COMPACT", "FROM_ENCODE", "NONE"};
+
+    hipStream_t aux;
+    HIPCHECK(hipStreamCreateWithFlags(&aux, hipStreamNonBlocking));
+    float *d_src, *d_wav, *d_out;
+    HIPCHECK(hipMalloc(&d_src, bytes));
+    HIPCHECK(hipMalloc(&d_wav, bytes));
+    HIPCHECK(hipMalloc(&d_out, bytes));
+    int blocks = (total + 255) / 256;
+    initSinKernel<<<blocks, 256>>>(d_src, N, N, N, 20.0f, 20.0f, 20.0f);
+    HIPCHECK(hipDeviceSynchronize());
+    std::vector<float> src(total), ref(total), out(total);
+    HIPCHECK(hipMemcpy(src.data(), d_src, bytes, hipMemcpyDeviceToHost));
+    const float rms = hostRMS(src.data(), total);
+
+    bool pass = true;
+    for (int v = 0; v < 3; ++v) {
+        hipCompressPlan* plan = nullptr;
+        HIPCHECK(hipCompressCreatePlan(&plan, N, N, N, aux,
+                                       HIP_COMPRESS_KERNEL_AUTO, stages[v]));
+        size_t maxout = 0;
+        unsigned char* d_comp = nullptr;
+        HIPCHECK(hipCompressMaxOutputSize(plan, &maxout));
+        HIPCHECK(hipMalloc(&d_comp, maxout));
+
+        // Reference: the whole pipeline on one stream that stays alive.
+        hipStream_t s;
+        HIPCHECK(hipStreamCreate(&s));
+        HIPCHECK(hipCopyToWaveletLayout(
+            d_src, N, N * N, 0, 0, 0, N, N, N, d_wav, plan->d_rms, plan, s));
+        HIPCHECK(hipCompress(scale, plan->d_rms, d_wav, d_comp, plan, s));
+        long ref_len = 0;
+        HIPCHECK(hipCompressSynchronize(plan, &ref_len, nullptr));
+        HIPCHECK(hipDecompress(d_comp, d_wav, plan, s));
+        HIPCHECK(hipCopyFromWaveletLayout(
+            d_wav, d_out, N, N * N, 0, 0, 0, N, N, N, plan, s));
+        HIPCHECK(hipStreamSynchronize(s));
+        HIPCHECK(hipMemcpy(ref.data(), d_out, bytes, hipMemcpyDeviceToHost));
+        const float ref_err = maxAbsError(src.data(), ref.data(), total);
+
+        int good = 0, new_handles = 0;
+        for (int r = 0; r < rounds; ++r) {
+            const bool distinct = (r % 2 == 0);
+            HIPCHECK(hipMemsetAsync(d_wav, 0, bytes, s));
+            HIPCHECK(hipMemsetAsync(d_out, 0, bytes, s));
+            HIPCHECK(hipCopyToWaveletLayout(
+                d_src, N, N * N, 0, 0, 0, N, N, N, d_wav, plan->d_rms, plan, s));
+            HIPCHECK(hipCompress(scale, plan->d_rms, d_wav, d_comp, plan, s));
+
+            hipStream_t old = s;
+            s = replaceStream(s, distinct);
+            if (s != old) ++new_handles;
+
+            long len = 0;
+            HIPCHECK(hipCompressSynchronize(plan, &len, nullptr));
+            HIPCHECK(hipDecompress(d_comp, d_wav, plan, s));
+            HIPCHECK(hipCopyFromWaveletLayout(
+                d_wav, d_out, N, N * N, 0, 0, 0, N, N, N, plan, s));
+
+            old = s;
+            s = replaceStream(s, distinct);
+            if (s != old) ++new_handles;
+
+            HIPCHECK(hipMemcpy(out.data(), d_out, bytes, hipMemcpyDeviceToHost));
+            if (len == ref_len && memcmp(out.data(), ref.data(), bytes) == 0)
+                ++good;
+        }
+        HIPCHECK(hipStreamDestroy(s));
+        // Every user stream is gone. Destroy must not touch any of them.
+        HIPCHECK(hipCompressDestroyPlan(plan));
+        HIPCHECK(hipFree(d_comp));
+
+        bool ok = ref_len > 0 && ref_err < rms && good == rounds;
+        printf("  aux=%-12s len=%ld, ref err=%.4e, rounds identical to ref=%d/%d "
+               "(%d new handles): %s\n",
+               stage_names[v], ref_len, ref_err, good, rounds, new_handles,
+               ok ? "PASS" : "FAIL");
+        pass = pass && ok;
+    }
+
+    HIPCHECK(hipFree(d_src)); HIPCHECK(hipFree(d_wav)); HIPCHECK(hipFree(d_out));
+    HIPCHECK(hipStreamDestroy(aux));
+    return pass;
+}
+
 int main(int argc, char** argv)
 {
     // Isolated diagnostic mode: a single numeric arg = forced byte shift for the
@@ -3316,7 +3423,7 @@ int main(int argc, char** argv)
 
     printf("=== hipCompress API Tests ===\n\n");
 
-    int passed = 0, total = 39;
+    int passed = 0, total = 40;
     if (test_plan_lifecycle())              ++passed;
     if (test_round_trip())                  ++passed;
     if (test_octree_round_trip())           ++passed;
@@ -3356,6 +3463,7 @@ int main(int argc, char** argv)
     if (test_pointer_shift_alignment(-1))         ++passed;
     if (test_two_stream_packing())                ++passed;
     if (test_cross_stream_copy_rms_ordering())    ++passed;
+    if (test_plan_outlives_user_streams())        ++passed;
 
     printf("\n%d/%d TESTS PASSED\n\n", passed, total);
 

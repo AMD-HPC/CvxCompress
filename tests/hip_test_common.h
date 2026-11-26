@@ -29,4 +29,21 @@ __global__ void spinKernel(long long ticks)
     while (wall_clock64() - t0 < ticks) {}
 }
 
+// Destroys `s` and returns a fresh stream, the way a caller does when it makes
+// one stream per operator call. With distinct_handle, the new stream is created
+// before the old one is destroyed, so HIP must give it a different handle.
+// Without it, HIP usually hands the destroyed handle back.
+static inline hipStream_t replaceStream(hipStream_t s, bool distinct_handle)
+{
+    hipStream_t next = nullptr;
+    if (distinct_handle) {
+        HIPCHECK(hipStreamCreate(&next));
+        HIPCHECK(hipStreamDestroy(s));
+    } else {
+        HIPCHECK(hipStreamDestroy(s));
+        HIPCHECK(hipStreamCreate(&next));
+    }
+    return next;
+}
+
 #endif // HIP_TEST_COMMON_H

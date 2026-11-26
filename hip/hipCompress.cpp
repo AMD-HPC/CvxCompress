@@ -41,22 +41,25 @@
     } \
 } while(0)
 
-// Plan workspace follows the caller's user stream. Work already queued on the
-// same stream needs no event. When the caller changes streams, bridge all prior
-// work to the new stream before it can reuse plan-owned buffers.
-static hipError_t hipCompressUseWorkspaceStream(
+// Calls on one plan share plan-owned buffers, so they must run in call order
+// even when the caller changes user streams. ready_event carries that order.
+// Each call first makes its stream wait on ready_event, then queues its work,
+// then records ready_event behind that work.
+//
+// The plan keeps no user stream handle. A caller may destroy a user stream and
+// keep the plan. A stored handle would then be dangling, and HIP often gives a
+// new stream the same handle, so comparing handles cannot tell streams apart.
+// An event stays valid after the stream it was recorded on is destroyed.
+static hipError_t hipCompressWaitForPriorCalls(
     hipCompressPlan* plan, hipStream_t stream)
 {
-    if (plan->workspace_stream_valid && plan->workspace_stream != stream) {
-        hipError_t err = hipEventRecord(
-            plan->ready_event, plan->workspace_stream);
-        if (err != hipSuccess) return err;
-        err = hipStreamWaitEvent(stream, plan->ready_event, 0);
-        if (err != hipSuccess) return err;
-    }
-    plan->workspace_stream = stream;
-    plan->workspace_stream_valid = true;
-    return hipSuccess;
+    return hipStreamWaitEvent(stream, plan->ready_event, 0);
+}
+
+static hipError_t hipCompressRecordCall(
+    hipCompressPlan* plan, hipStream_t stream)
+{
+    return hipEventRecord(plan->ready_event, stream);
 }
 
 // Opt-in diagnostics: set HIPCOMPRESS_DEBUG=1 for scheme + result lines,
@@ -178,11 +181,9 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
     p->is_2d = is_2d;
     p->aux_stream = aux_stream;
     p->aux_from = aux_from;
-    p->pending_stream = aux_stream;
+    p->pending_on_aux = true;
     p->compress_pending = false;
     p->compress_data_ready = false;
-    p->workspace_stream = nullptr;
-    p->workspace_stream_valid = false;
     p->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
 
     if (is_2d) {
@@ -273,10 +274,14 @@ hipError_t hipCompressCreatePlan(hipCompressPlan** plan, int nx, int ny, int nz,
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan)
 {
     if (!plan) return hipErrorInvalidValue;
-    if (plan->compress_pending)
-        (void)hipStreamSynchronize(plan->pending_stream);
-    if (plan->workspace_stream_valid)
-        (void)hipStreamSynchronize(plan->workspace_stream);
+    // Wait for the work queued through the plan. Every call waited on
+    // ready_event before it recorded it again, so the last record is behind all
+    // user-stream work. No user stream is touched: the caller may have destroyed
+    // them already.
+    if (plan->ready_event)
+        (void)hipEventSynchronize(plan->ready_event);
+    if (plan->compress_pending && plan->pending_on_aux)
+        (void)hipStreamSynchronize(plan->aux_stream);
     (void)hipFree(plan->d_scratch);
     (void)hipFree(plan->d_mulfac);
     (void)hipFree(plan->d_block_sizes);
@@ -330,7 +335,7 @@ hipError_t hipCompress(
     // OCTREE and QUADTREE carry a per-block significance-size table.
     const int hdr_size = hipOctreeHeaderSize(nb, num_mulfacs);
     hipStream_t s = user_stream;
-    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, s));
+    HIPCHECK_PLAN(plan, hipCompressWaitForPriorCalls(plan, s));
     // AUX_NONE collapses aux onto the user stream, which makes every "aux"
     // launch below run in order on s and turns bridge() into a no-op.
     hipStream_t aux = (plan->aux_from == HIP_COMPRESS_AUX_NONE)
@@ -428,7 +433,15 @@ hipError_t hipCompress(
     HIPCHECK_PLAN(plan, hipMemcpyAsync(&plan->h_staging[1], plan->d_block_sizes + (nb - 1),
                             sizeof(size_t), hipMemcpyDeviceToHost, aux));
 
-    plan->pending_stream = aux;
+    // The bridge recorded ready_event behind the last work on user_stream. With
+    // no bridge (aux and user are one stream), record it here, behind the whole
+    // chain.
+    if (!bridged)
+        HIPCHECK_PLAN(plan, hipCompressRecordCall(plan, s));
+
+    // At AUX_NONE the tail runs on user_stream, which the plan does not keep.
+    // hipCompressSynchronize then waits on ready_event.
+    plan->pending_on_aux = (plan->aux_from != HIP_COMPRESS_AUX_NONE);
     plan->compress_pending = true;
     return hipSuccess;
 }
@@ -440,7 +453,10 @@ hipError_t hipCompressSynchronize(hipCompressPlan* plan)
     if (!plan->compress_pending)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_NO_COMPRESS_PENDING, hipErrorNotReady);
 
-    HIPCHECK_PLAN(plan, hipStreamSynchronize(plan->pending_stream));
+    if (plan->pending_on_aux)
+        HIPCHECK_PLAN(plan, hipStreamSynchronize(plan->aux_stream));
+    else
+        HIPCHECK_PLAN(plan, hipEventSynchronize(plan->ready_event));
 
     plan->compress_pending = false;
     plan->compress_data_ready = true;
@@ -537,9 +553,7 @@ hipError_t hipCopyToWaveletLayout(
 
     hipStream_t s = user_stream;
     // Copy/RMS uses plan-owned partial sums and commonly writes plan->d_rms.
-    // Bridge only when the caller changes streams; same-stream work is already
-    // ordered and should not pay an event-record cost.
-    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, s));
+    HIPCHECK_PLAN(plan, hipCompressWaitForPriorCalls(plan, s));
     bool do_copy = (d_dst != nullptr);
     bool do_rms  = (d_rms_out != nullptr);
     long total_samples = (long)ex * ey * ez;
@@ -572,10 +586,9 @@ hipError_t hipCopyToWaveletLayout(
             plan->d_partial_sums, d_rms_out, total_blocks, total_samples);
     }
 
-    hipError_t launch_err = hipGetLastError();
-    if (launch_err != hipSuccess)
-        plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
-    return launch_err;
+    HIPCHECK_PLAN(plan, hipGetLastError());
+    HIPCHECK_PLAN(plan, hipCompressRecordCall(plan, s));
+    return hipSuccess;
 }
 
 hipError_t hipComputeRMS(
@@ -627,16 +640,15 @@ hipError_t hipCopyFromWaveletLayout(
     if (wnx != plan->nx || wny != plan->ny || wnz != plan->nz)
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_EXTRACTION_DIMS_MISMATCH, hipErrorInvalidValue);
 
-    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, user_stream));
+    HIPCHECK_PLAN(plan, hipCompressWaitForPriorCalls(plan, user_stream));
     dim3 grid(wnx / 32, wny / 32, (wnz + BCOPY_ZPB - 1) / BCOPY_ZPB);
     hipcvx_copyFromWaveletKernelOpt<<<grid, 256, 0, user_stream>>>(
         d_src, wnx, wny, wnz,
         d_dst, ldimx, ldimxy, x0, y0, z0, ex, ey, ez);
 
-    hipError_t launch_err = hipGetLastError();
-    if (launch_err != hipSuccess)
-        plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
-    return launch_err;
+    HIPCHECK_PLAN(plan, hipGetLastError());
+    HIPCHECK_PLAN(plan, hipCompressRecordCall(plan, user_stream));
+    return hipSuccess;
 }
 
 hipError_t hipDecompress(
@@ -657,7 +669,7 @@ hipError_t hipDecompress(
         PLAN_ERROR(plan, HIP_COMPRESS_ERROR_INVALID_ALIGNMENT,
                    hipErrorInvalidValue);
 
-    HIPCHECK_PLAN(plan, hipCompressUseWorkspaceStream(plan, user_stream));
+    HIPCHECK_PLAN(plan, hipCompressWaitForPriorCalls(plan, user_stream));
 
     const int nx = plan->nx, ny = plan->ny, nz = plan->nz;
     const int ldimx = nx;
@@ -688,10 +700,9 @@ hipError_t hipDecompress(
         }
     }
 
-    hipError_t launch_err = hipGetLastError();
-    if (launch_err != hipSuccess)
-        plan->last_error = HIP_COMPRESS_ERROR_HIP_RUNTIME;
-    return launch_err;
+    HIPCHECK_PLAN(plan, hipGetLastError());
+    HIPCHECK_PLAN(plan, hipCompressRecordCall(plan, user_stream));
+    return hipSuccess;
 }
 
 hipError_t hipCompressBufferSize(const hipCompressPlan* plan, size_t* size)

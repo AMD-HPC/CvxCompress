@@ -95,19 +95,18 @@ struct hipCompressPlan {
     // Read fresh on every hipCompress call, so it may be changed between calls
     // (but not while compress_pending is true) to move the split per snapshot.
     hipCompressAuxStage aux_from;
+    // Orders the calls on this plan. Each call makes its user stream wait on
+    // ready_event, then records ready_event behind the work it queued. The plan
+    // keeps no user stream handle, so user streams may be destroyed while the
+    // plan lives.
     hipEvent_t  ready_event;
-    // Last user stream that accessed plan workspace. Calls on the same stream
-    // are naturally ordered. A stream change records ready_event on this
-    // stream and waits for it on the new stream.
-    hipStream_t workspace_stream;
-    bool workspace_stream_valid;
     size_t* h_staging;  // pinned host, 2 values: [offsets[nb-1], sizes[nb-1]]
 
-    // Stream the D2H readback of the pending compress was enqueued on, i.e. the
-    // one hipCompressSynchronize must block on. Equals aux_stream except at
-    // AUX_NONE, where the tail stays on the caller's user_stream and syncing
-    // aux_stream would return without waiting for anything.
-    hipStream_t pending_stream;
+    // Where the D2H readback of the pending compress was queued. True: on
+    // aux_stream, and hipCompressSynchronize blocks on that stream. False
+    // (AUX_NONE): on the caller's user_stream, and hipCompressSynchronize
+    // blocks on ready_event, which was recorded behind the readback.
+    bool pending_on_aux;
     bool compress_pending;  // true between hipCompress and hipCompressSynchronize
     bool compress_data_ready;  // true after sync until next accepted hipCompress
     mutable hipCompressError_t last_error;
@@ -129,9 +128,11 @@ inline void hipCompressWaveletDims(int wx, int wy, int wz,
 }
 
 
-// Plan owns internal buffers and an event for stream bridging.
+// Plan owns internal buffers and an event that orders the calls on the plan.
 // aux_stream runs the stages selected by aux_from. User-owned, shareable across
-// plans. One plan must not be used concurrently from multiple host threads.
+// plans. It must stay alive until the plan is destroyed. The user streams
+// passed to the other calls may be destroyed while the plan lives.
+// One plan must not be used concurrently from multiple host threads.
 // Compress is exclusive (writes plan buffers).
 hipError_t hipCompressCreatePlan(
     hipCompressPlan** plan,
@@ -140,9 +141,9 @@ hipError_t hipCompressCreatePlan(
     hipCompressKernel kernel = HIP_COMPRESS_KERNEL_AUTO,
     hipCompressAuxStage aux_from = HIP_COMPRESS_AUX_FROM_COMPACT);
 
-// Waits for the work still queued on the last user stream, and on the pending
-// compress stream if one is pending, then frees the plan. Both streams must
-// still exist. Destroy the plan before you destroy those streams.
+// Waits for the work queued through the plan, then frees it. The wait goes
+// through the plan's event, so the user streams may already be destroyed.
+// aux_stream must still exist.
 hipError_t hipCompressDestroyPlan(hipCompressPlan* plan);
 
 // Copy from a strided source volume to a 32-divisible wavelet-layout buffer.
