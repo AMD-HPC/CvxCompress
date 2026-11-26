@@ -48,7 +48,7 @@ or `gfx950` for MI355X.
 
 Run each binary from the repository root, for example `./build/test_compress_api_hip`.
 
-`test_compress_api_hip` runs the 39 API tests first. The exit code reports only
+`test_compress_api_hip` runs the 40 API tests first. The exit code reports only
 those tests. With no arguments, it then runs three benchmarks:
 
 - `bench_copy_kernels`: copy and RMS kernel bandwidth.
@@ -328,11 +328,12 @@ call the library.
   `hipCompress` must be synchronized before the next. `hipDecompress` also
   fails with `hipErrorNotReady` while a compress is pending. Sequential calls may use
   different user streams; the plan orders copy, RMS, compress, and decompress
-  work through an internal event. The plan remembers the last user stream by
-  its handle. `hipCompressDestroyPlan` waits on that stream, so destroy the plan
-  before you destroy the stream. Do not reuse a destroyed stream's handle for a
-  new stream while the plan is alive, because the plan would treat the new
-  stream as the old one and skip the ordering.
+  work through an internal event.
+- **Stream lifetime**: the plan keeps no user stream handle. You may destroy a
+  user stream and keep using the plan with another stream. For example, you can
+  cache one plan and create and destroy a stream around each operator call.
+  `aux_stream` is different. The plan keeps it, so it must stay alive until
+  `hipCompressDestroyPlan` returns.
 - **Data type**: `float` only (single precision).
 
 ## File Structure
